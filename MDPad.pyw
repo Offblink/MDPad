@@ -9,8 +9,8 @@ from PyQt5.QtWidgets import (
     QDialog, QDialogButtonBox, QFormLayout, QSpinBox, QFontComboBox,
     QCheckBox, QTextBrowser
 )
-from PyQt5.QtCore import Qt, QUrl, QSize, QSettings
-from PyQt5.QtGui import QFont, QTextCursor, QKeySequence, QIcon, QColor, QPixmap
+from PyQt5.QtCore import Qt, QUrl, QSize, QSettings, QMimeData
+from PyQt5.QtGui import QFont, QTextCursor, QKeySequence, QIcon, QColor, QPixmap, QDragEnterEvent, QDropEvent
 from PyQt5.QtWebEngineWidgets import QWebEngineView
 import markdown
 import markdown.extensions
@@ -434,6 +434,65 @@ class MarkdownEditor(QMainWindow):
         self.init_ui()
         self.load_settings()
         
+        # 启用拖放功能
+        self.setAcceptDrops(True)
+        
+    def dragEnterEvent(self, event: QDragEnterEvent):
+        """处理拖放进入事件，验证文件类型"""
+        if event.mimeData().hasUrls():
+            # 检查是否有.md或.txt文件
+            urls = event.mimeData().urls()
+            for url in urls:
+                file_path = url.toLocalFile()
+                if file_path and (file_path.lower().endswith(('.md', '.markdown', '.txt'))):
+                    event.acceptProposedAction()
+                    return
+        event.ignore()
+        
+    def dropEvent(self, event: QDropEvent):
+        """处理拖放释放事件，加载文件"""
+        if event.mimeData().hasUrls():
+            urls = event.mimeData().urls()
+            if urls:
+                # 只处理第一个文件
+                file_path = urls[0].toLocalFile()
+                
+                if not file_path:
+                    QMessageBox.warning(self, "拖放错误", 
+                                      "无法获取有效的文件路径。")
+                    return
+                    
+                if not os.path.exists(file_path):
+                    QMessageBox.warning(self, "文件不存在", 
+                                      f"文件不存在或无法访问:\n{file_path}")
+                    return
+                    
+                if not os.path.isfile(file_path):
+                    QMessageBox.warning(self, "不是文件", 
+                                      f"拖放的不是一个文件:\n{file_path}")
+                    return
+                
+                # 检查文件扩展名
+                if not file_path.lower().endswith(('.md', '.markdown', '.txt')):
+                    reply = QMessageBox.question(
+                        self, '打开文件',
+                        f'文件"{os.path.basename(file_path)}"可能不是Markdown文件。\n是否仍然尝试打开？',
+                        QMessageBox.Yes | QMessageBox.No
+                    )
+                    if reply != QMessageBox.Yes:
+                        return
+                
+                # 检查是否有未保存的更改
+                if self.check_save_changes():
+                    try:
+                        self.load_file(file_path)
+                        self.status_bar.showMessage(f"已通过拖放打开: {os.path.basename(file_path)}", 3000)
+                    except Exception as e:
+                        QMessageBox.critical(self, "打开失败", 
+                                           f"无法打开文件:\n{str(e)}")
+                
+                event.acceptProposedAction()
+            
     def init_ui(self):
         """初始化用户界面"""
         self.setWindowTitle('MDPad - Markdown 编辑器')
@@ -627,14 +686,21 @@ class MarkdownEditor(QMainWindow):
         self.text_edit.setFont(QFont("Consolas", 11))
         self.text_edit.textChanged.connect(self.update_preview)
         self.text_edit.cursorPositionChanged.connect(self.update_cursor_position)
+        # 关键修改1：禁止文本编辑框本身接受拖放，让事件传递给父窗口
+        self.text_edit.setAcceptDrops(False)
         
         # 创建预览窗口
         self.preview = MarkdownPreview()
+        # 关键修改2：禁止预览组件本身接受拖放，让事件传递给父窗口
+        self.preview.setAcceptDrops(False)
         
         # 添加到分割器
         self.editor_splitter.addWidget(self.text_edit)
         self.editor_splitter.addWidget(self.preview)
         
+        # 关键修改3：确保分割器本身也不会拦截拖放事件
+        self.editor_splitter.setAcceptDrops(False)      
+    
     def set_split_mode(self, enabled):
         """设置分屏模式"""
         self.split_mode = enabled
@@ -650,6 +716,7 @@ class MarkdownEditor(QMainWindow):
             else:
                 self.text_edit.hide()
                 self.preview.show()
+                self.update_preview()
                 
     def update_cursor_position(self):
         """更新光标位置显示"""
@@ -721,6 +788,8 @@ class MarkdownEditor(QMainWindow):
                 self.current_file = file_path
                 self.setWindowTitle(f'MDPad - {os.path.basename(file_path)}')
                 self.status_bar.showMessage(f"已打开: {file_path}", 3000)
+                # 强制更新预览，无论其当前是否可见
+                self.preview.update_preview(content)
         except Exception as e:
             QMessageBox.critical(self, "错误", f"无法打开文件: {str(e)}")
             
@@ -970,6 +1039,30 @@ def main():
     # 设置窗口图标
     if os.path.exists(icon_path):
         editor.setWindowIcon(QIcon(icon_path))
+    
+    # --- 处理命令行参数以支持关联打开 ---
+    # 判断是否通过命令行参数指定了文件（例如通过右键"打开方式"）
+    # sys.argv[0] 是脚本名，从 sys.argv[1] 开始是用户传入的参数
+    if len(sys.argv) > 1:
+        # 假设第一个参数是文件路径
+        file_to_open = sys.argv[1]
+        # 检查文件是否存在且是有效文件
+        if os.path.isfile(file_to_open):
+            # 检查文件扩展名是否为支持的Markdown格式
+            supported_extensions = ('.md', '.markdown', '.txt')
+            if file_to_open.lower().endswith(supported_extensions):
+                # 通过现有的方法加载文件
+                editor.load_file(file_to_open)
+            else:
+                # 如果不是支持的格式，可以给出提示或尝试打开
+                reply = QMessageBox.question(editor, '打开文件',
+                                           f'文件"{os.path.basename(file_to_open)}"可能不是标准的Markdown文件。\n是否仍然尝试打开？',
+                                           QMessageBox.Yes | QMessageBox.No)
+                if reply == QMessageBox.Yes:
+                    editor.load_file(file_to_open)
+        else:
+            QMessageBox.warning(editor, "文件未找到", f"无法找到文件：{file_to_open}")
+    # --- 参数处理结束 ---
     
     editor.show()
     
