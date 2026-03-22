@@ -1,0 +1,979 @@
+import sys
+import os
+import webbrowser
+from pathlib import Path
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QTextEdit, QSplitter, QToolBar, QStatusBar, QFileDialog, QMessageBox,
+    QAction, QLabel, QTabWidget, QScrollArea, QGroupBox, QPushButton,
+    QDialog, QDialogButtonBox, QFormLayout, QSpinBox, QFontComboBox,
+    QCheckBox, QTextBrowser
+)
+from PyQt5.QtCore import Qt, QUrl, QSize, QSettings
+from PyQt5.QtGui import QFont, QTextCursor, QKeySequence, QIcon, QColor, QPixmap
+from PyQt5.QtWebEngineWidgets import QWebEngineView
+import markdown
+import markdown.extensions
+import html
+
+class AboutDialog(QDialog):
+    """关于对话框"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("关于 MDPad")
+        self.setFixedSize(400, 300)
+        
+        layout = QVBoxLayout()
+        
+        # 标题
+        title_label = QLabel("MDPad Markdown 编辑器")
+        title_font = title_label.font()
+        title_font.setPointSize(16)
+        title_font.setBold(True)
+        title_label.setFont(title_font)
+        title_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(title_label)
+        
+        # 版本信息
+        version_label = QLabel("版本 1.0.0")
+        version_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(version_label)
+        
+        layout.addSpacing(20)
+        
+        # 描述
+        desc_label = QLabel(
+            "MDPad 是一个功能完整的 Markdown 编辑器，支持实时预览、\n"
+            "分屏编辑、语法高亮等功能。\n\n"
+            "基于 PyQt5 和 Python-Markdown 构建。"
+        )
+        desc_label.setAlignment(Qt.AlignCenter)
+        desc_label.setWordWrap(True)
+        layout.addWidget(desc_label)
+        
+        layout.addStretch()
+        
+        # 作者信息
+        author_label = QLabel("© 2026 Blinvo")
+        author_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(author_label)
+        
+        # 按钮
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok)
+        buttons.accepted.connect(self.accept)
+        layout.addWidget(buttons)
+        
+        self.setLayout(layout)
+
+class HelpDialog(QDialog):
+    """帮助对话框"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("MDPad 帮助")
+        self.resize(600, 500)
+        
+        layout = QVBoxLayout()
+        
+        # 创建选项卡
+        tabs = QTabWidget()
+        
+        # 快捷键标签页
+        shortcuts_tab = QScrollArea()
+        shortcuts_widget = QWidget()
+        shortcuts_layout = QVBoxLayout(shortcuts_widget)
+        
+        # 文件操作
+        file_group = QGroupBox("文件操作")
+        file_layout = QFormLayout()
+        file_layout.addRow("新建文件", QLabel("Ctrl + N"))
+        file_layout.addRow("打开文件", QLabel("Ctrl + O"))
+        file_layout.addRow("保存文件", QLabel("Ctrl + S"))
+        file_layout.addRow("另存为", QLabel("Ctrl + Shift + S"))
+        file_group.setLayout(file_layout)
+        shortcuts_layout.addWidget(file_group)
+        
+        # 编辑操作
+        edit_group = QGroupBox("编辑操作")
+        edit_layout = QFormLayout()
+        edit_layout.addRow("撤销", QLabel("Ctrl + Z"))
+        edit_layout.addRow("重做", QLabel("Ctrl + Y 或 Ctrl + Shift + Z"))
+        edit_layout.addRow("复制", QLabel("Ctrl + C"))
+        edit_layout.addRow("粘贴", QLabel("Ctrl + V"))
+        edit_layout.addRow("全选", QLabel("Ctrl + A"))
+        edit_group.setLayout(edit_layout)
+        shortcuts_layout.addWidget(edit_group)
+        
+        # 格式操作
+        format_group = QGroupBox("格式操作")
+        format_layout = QFormLayout()
+        format_layout.addRow("加粗", QLabel("Ctrl + B"))
+        format_layout.addRow("斜体", QLabel("Ctrl + I"))
+        format_layout.addRow("代码块", QLabel("Ctrl + K"))
+        format_layout.addRow("插入链接", QLabel("Ctrl + L"))
+        format_group.setLayout(format_layout)
+        shortcuts_layout.addWidget(format_group)
+        
+        # 视图操作
+        view_group = QGroupBox("视图操作")
+        view_layout = QFormLayout()
+        view_layout.addRow("编辑模式", QLabel("F2"))
+        view_layout.addRow("预览模式", QLabel("F3"))
+        view_layout.addRow("分屏模式", QLabel("F4"))
+        view_group.setLayout(view_layout)
+        shortcuts_layout.addWidget(view_group)
+        
+        shortcuts_layout.addStretch()
+        shortcuts_tab.setWidget(shortcuts_widget)
+        
+        # 关于标签页
+        about_tab = QWidget()
+        about_layout = QVBoxLayout(about_tab)
+        
+        about_text = QTextBrowser()
+        about_text.setPlainText("""
+MDPad Markdown 编辑器
+
+版本: 1.0.0
+构建日期: 2026年3月
+
+功能特性:
+- 实时 Markdown 预览
+- 分屏编辑模式
+- 语法高亮
+- 导出 HTML
+- 自定义主题
+- 快捷键支持
+
+技术栈:
+- Python 3.x
+- PyQt5
+- Python-Markdown
+- PyQtWebEngine
+        """)
+        about_layout.addWidget(about_text)
+        
+        # 添加所有标签页
+        tabs.addTab(shortcuts_tab, "快捷键")
+        tabs.addTab(about_tab, "关于")
+        
+        layout.addWidget(tabs)
+        
+        # 按钮
+        buttons = QDialogButtonBox()
+        close_button = buttons.addButton("关闭", QDialogButtonBox.RejectRole)
+        close_button.clicked.connect(self.reject)
+        
+        github_button = QPushButton("GitHub 仓库")
+        github_button.clicked.connect(lambda: webbrowser.open("https://github.com"))
+        buttons.addButton(github_button, QDialogButtonBox.ActionRole)
+        
+        layout.addWidget(buttons)
+        self.setLayout(layout)
+
+class MarkdownPreview(QWebEngineView):
+    """Markdown预览组件"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setContextMenuPolicy(Qt.NoContextMenu)
+        
+    def update_preview(self, markdown_text):
+        """更新预览内容"""
+        try:
+            # 使用多个扩展
+            extensions = [
+                'markdown.extensions.extra',
+                'markdown.extensions.codehilite',
+                'markdown.extensions.toc',
+                'markdown.extensions.tables',
+                'markdown.extensions.fenced_code',
+                'markdown.extensions.nl2br',
+            ]
+            
+            html_content = markdown.markdown(markdown_text, extensions=extensions)
+            
+            # 完整的HTML模板
+            html_template = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="utf-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <style>
+                    /* GitHub风格的Markdown样式 */
+                    body {{
+                        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+                        font-size: 16px;
+                        line-height: 1.6;
+                        color: #24292e;
+                        background-color: #fff;
+                        padding: 20px;
+                        max-width: 800px;
+                        margin: 0 auto;
+                    }}
+                    
+                    /* 标题 */
+                    h1, h2, h3, h4, h5, h6 {{
+                        margin-top: 24px;
+                        margin-bottom: 16px;
+                        font-weight: 600;
+                        line-height: 1.25;
+                        padding-bottom: 0.3em;
+                        border-bottom: 1px solid #eaecef;
+                    }}
+                    
+                    h1 {{ font-size: 2em; }}
+                    h2 {{ font-size: 1.5em; }}
+                    h3 {{ font-size: 1.25em; }}
+                    h4 {{ font-size: 1em; }}
+                    h5 {{ font-size: 0.875em; }}
+                    h6 {{ font-size: 0.85em; color: #6a737d; }}
+                    
+                    /* 段落和文本 */
+                    p {{
+                        margin-top: 0;
+                        margin-bottom: 16px;
+                    }}
+                    
+                    /* 列表 */
+                    ul, ol {{
+                        padding-left: 2em;
+                        margin-top: 0;
+                        margin-bottom: 16px;
+                    }}
+                    
+                    li + li {{
+                        margin-top: 0.25em;
+                    }}
+                    
+                    /* 代码 */
+                    code {{
+                        font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, Courier, monospace;
+                        font-size: 85%;
+                        padding: 0.2em 0.4em;
+                        margin: 0;
+                        background-color: rgba(27,31,35,0.05);
+                        border-radius: 3px;
+                    }}
+                    
+                    pre {{
+                        background-color: #f6f8fa;
+                        border-radius: 3px;
+                        padding: 16px;
+                        overflow: auto;
+                        line-height: 1.45;
+                    }}
+                    
+                    pre code {{
+                        background-color: transparent;
+                        padding: 0;
+                        border-radius: 0;
+                    }}
+                    
+                    /* 引用 */
+                    blockquote {{
+                        padding: 0 1em;
+                        color: #6a737d;
+                        border-left: 0.25em solid #dfe2e5;
+                        margin: 0 0 16px 0;
+                    }}
+                    
+                    blockquote > :first-child {{
+                        margin-top: 0;
+                    }}
+                    
+                    blockquote > :last-child {{
+                        margin-bottom: 0;
+                    }}
+                    
+                    /* 表格 */
+                    table {{
+                        border-spacing: 0;
+                        border-collapse: collapse;
+                        margin-bottom: 16px;
+                        width: 100%;
+                    }}
+                    
+                    th, td {{
+                        padding: 6px 13px;
+                        border: 1px solid #dfe2e5;
+                    }}
+                    
+                    th {{
+                        font-weight: 600;
+                        background-color: #f6f8fa;
+                    }}
+                    
+                    tr:nth-child(2n) {{
+                        background-color: #f6f8fa;
+                    }}
+                    
+                    /* 链接 */
+                    a {{
+                        color: #0366d6;
+                        text-decoration: none;
+                    }}
+                    
+                    a:hover {{
+                        text-decoration: underline;
+                    }}
+                    
+                    /* 图片 */
+                    img {{
+                        max-width: 100%;
+                        box-sizing: initial;
+                        background-color: #fff;
+                        border-style: none;
+                    }}
+                    
+                    /* 水平线 */
+                    hr {{
+                        height: 0.25em;
+                        padding: 0;
+                        margin: 24px 0;
+                        background-color: #e1e4e8;
+                        border: 0;
+                    }}
+                    
+                    /* 任务列表 */
+                    .task-list-item {{
+                        list-style-type: none;
+                    }}
+                    
+                    .task-list-item-checkbox {{
+                        margin: 0 0.2em 0.25em -1.6em;
+                        vertical-align: middle;
+                    }}
+                    
+                    /* 代码高亮 */
+                    .codehilite .hll {{ background-color: #ffffcc }}
+                    .codehilite  {{ background: #f8f8f8; }}
+                    .codehilite .c {{ color: #408080; font-style: italic }} /* Comment */
+                    .codehilite .err {{ border: 1px solid #FF0000 }} /* Error */
+                    .codehilite .k {{ color: #008000; font-weight: bold }} /* Keyword */
+                    .codehilite .o {{ color: #666666 }} /* Operator */
+                    .codehilite .ch {{ color: #408080; font-style: italic }} /* Comment.Hashbang */
+                    .codehilite .cm {{ color: #408080; font-style: italic }} /* Comment.Multiline */
+                    .codehilite .cp {{ color: #BC7A00 }} /* Comment.Preproc */
+                    .codehilite .cpf {{ color: #408080; font-style: italic }} /* Comment.PreprocFile */
+                    .codehilite .c1 {{ color: #408080; font-style: italic }} /* Comment.Single */
+                    .codehilite .cs {{ color: #408080; font-style: italic }} /* Comment.Single */
+                    .codehilite .gd {{ color: #A00000 }} /* Generic.Deleted */
+                    .codehilite .ge {{ font-style: italic }} /* Generic.Emph */
+                    .codehilite .gr {{ color: #FF0000 }} /* Generic.Error */
+                    .codehilite .gh {{ color: #000080; font-weight: bold }} /* Generic.Heading */
+                    .codehilite .gi {{ color: #00A000 }} /* Generic.Inserted */
+                    .codehilite .go {{ color: #888888 }} /* Generic.Output */
+                    .codehilite .gp {{ color: #000080; font-weight: bold }} /* Generic.Prompt */
+                    .codehilite .gs {{ font-weight: bold }} /* Generic.Strong */
+                    .codehilite .gu {{ color: #800080; font-weight: bold }} /* Generic.Subheading */
+                    .codehilite .gt {{ color: #0044DD }} /* Generic.Traceback */
+                    .codehilite .kc {{ color: #008000; font-weight: bold }} /* Keyword.Constant */
+                    .codehilite .kd {{ color: #008000; font-weight: bold }} /* Keyword.Declaration */
+                    .codehilite .kn {{ color: #008000; font-weight: bold }} /* Keyword.Namespace */
+                    .codehilite .kp {{ color: #008000 }} /* Keyword.Pseudo */
+                    .codehilite .kr {{ color: #008000; font-weight: bold }} /* Keyword.Reserved */
+                    .codehilite .kt {{ color: #B00040 }} /* Keyword.Type */
+                    .codehilite .m {{ color: #666666 }} /* Literal.Number */
+                    .codehilite .s {{ color: #BA2121 }} /* Literal.String */
+                    .codehilite .na {{ color: #7D9029 }} /* Name.Attribute */
+                    .codehilite .nb {{ color: #008000 }} /* Name.Builtin */
+                    .codehilite .nc {{ color: #0000FF; font-weight: bold }} /* Name.Class */
+                    .codehilite .no {{ color: #880000 }} /* Name.Constant */
+                    .codehilite .nd {{ color: #AA22FF }} /* Name.Decorator */
+                    .codehilite .ni {{ color: #999999; font-weight: bold }} /* Name.Entity */
+                    .codehilite .ne {{ color: #D2413A; font-weight: bold }} /* Name.Exception */
+                    .codehilite .nf {{ color: #0000FF }} /* Name.Function */
+                    .codehilite .nl {{ color: #A0A000 }} /* Name.Label */
+                    .codehilite .nn {{ color: #0000FF; font-weight: bold }} /* Name.Namespace */
+                    .codehilite .nt {{ color: #008000; font-weight: bold }} /* Name.Tag */
+                    .codehilite .nv {{ color: #19177C }} /* Name.Variable */
+                    .codehilite .ow {{ color: #AA22FF; font-weight: bold }} /* Operator.Word */
+                    .codehilite .w {{ color: #bbbbbb }} /* Text.Whitespace */
+                    .codehilite .mb {{ color: #666666 }} /* Literal.Number.Bin */
+                    .codehilite .mf {{ color: #666666 }} /* Literal.Number.Float */
+                    .codehilite .mh {{ color: #666666 }} /* Literal.Number.Hex */
+                    .codehilite .mi {{ color: #666666 }} /* Literal.Number.Integer */
+                    .codehilite .mo {{ color: #666666 }} /* Literal.Number.Oct */
+                    .codehilite .sa {{ color: #BA2121 }} /* Literal.String.Affix */
+                    .codehilite .sb {{ color: #BA2121 }} /* Literal.String.Backtick */
+                    .codehilite .sc {{ color: #BA2121 }} /* Literal.String.Char */
+                    .codehilite .dl {{ color: #BA2121 }} /* Literal.String.Delimiter */
+                    .codehilite .sd {{ color: #BA2121; font-style: italic }} /* Literal.String.Doc */
+                    .codehilite .s2 {{ color: #BA2121 }} /* Literal.String.Double */
+                    .codehilite .se {{ color: #BB6622; font-weight: bold }} /* Literal.String.Escape */
+                    .codehilite .sh {{ color: #BA2121 }} /* Literal.String.Heredoc */
+                    .codehilite .si {{ color: #BB6688; font-weight: bold }} /* Literal.String.Interpol */
+                    .codehilite .sx {{ color: #008000 }} /* Literal.String.Other */
+                    .codehilite .sr {{ color: #BB6688 }} /* Literal.String.Regex */
+                    .codehilite .s1 {{ color: #BA2121 }} /* Literal.String.Single */
+                    .codehilite .ss {{ color: #19177C }} /* Literal.String.Symbol */
+                    .codehilite .bp {{ color: #008000 }} /* Name.Builtin.Pseudo */
+                    .codehilite .fm {{ color: #0000FF }} /* Name.Function.Magic */
+                    .codehilite .vc {{ color: #19177C }} /* Name.Variable.Class */
+                    .codehilite .vg {{ color: #19177C }} /* Name.Variable.Global */
+                    .codehilite .vi {{ color: #19177C }} /* Name.Variable.Instance */
+                    .codehilite .vm {{ color: #19177C }} /* Name.Variable.Magic */
+                    .codehilite .il {{ color: #666666 }} /* Literal.Number.Integer.Long */
+                </style>
+            </head>
+            <body>
+                {html_content}
+            </body>
+            </html>
+            """
+            self.setHtml(html_template)
+        except Exception as e:
+            self.setHtml(f"<h1>预览错误</h1><p>{str(e)}</p>")
+
+class MarkdownEditor(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.current_file = None
+        self.split_mode = True  # 默认分屏模式
+        self.editing_mode = True
+        self.init_ui()
+        self.load_settings()
+        
+    def init_ui(self):
+        """初始化用户界面"""
+        self.setWindowTitle('MDPad - Markdown 编辑器')
+        self.setGeometry(100, 100, 1200, 800)
+        
+        # 设置图标
+        icon_path = os.path.join(os.path.dirname(__file__), "icon.ico")
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
+        
+        # 创建中心部件
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        
+        # 主布局
+        main_layout = QVBoxLayout(central_widget)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # 创建菜单栏
+        self.create_menubar()
+        
+        # 创建工具栏
+        self.create_toolbar()
+        main_layout.addWidget(self.toolbar)
+        
+        # 创建状态栏
+        self.status_bar = QStatusBar()
+        self.setStatusBar(self.status_bar)
+        self.cursor_position_label = QLabel("行: 1, 列: 1")
+        self.status_bar.addPermanentWidget(self.cursor_position_label)
+        
+        # 创建主编辑器区域
+        self.create_editor_area()
+        main_layout.addWidget(self.editor_splitter, 1)
+        
+        # 设置初始状态为分屏模式
+        self.set_split_mode(True)
+        
+    def create_menubar(self):
+        """创建菜单栏"""
+        menubar = self.menuBar()
+        
+        # 文件菜单
+        file_menu = menubar.addMenu('文件')
+        
+        new_action = QAction('新建', self)
+        new_action.setShortcut('Ctrl+N')
+        new_action.triggered.connect(self.new_file)
+        file_menu.addAction(new_action)
+        
+        open_action = QAction('打开', self)
+        open_action.setShortcut('Ctrl+O')
+        open_action.triggered.connect(self.open_file)
+        file_menu.addAction(open_action)
+        
+        file_menu.addSeparator()
+        
+        save_action = QAction('保存', self)
+        save_action.setShortcut('Ctrl+S')
+        save_action.triggered.connect(self.save_file)
+        file_menu.addAction(save_action)
+        
+        save_as_action = QAction('另存为', self)
+        save_as_action.setShortcut('Ctrl+Shift+S')
+        save_as_action.triggered.connect(self.save_file_as)
+        file_menu.addAction(save_as_action)
+        
+        file_menu.addSeparator()
+        
+        export_html_action = QAction('导出为HTML', self)
+        export_html_action.triggered.connect(self.export_html)
+        file_menu.addAction(export_html_action)
+        
+        file_menu.addSeparator()
+        
+        exit_action = QAction('退出', self)
+        exit_action.setShortcut('Ctrl+Q')
+        exit_action.triggered.connect(self.close)
+        file_menu.addAction(exit_action)
+        
+        # 编辑菜单
+        edit_menu = menubar.addMenu('编辑')
+        
+        undo_action = QAction('撤销', self)
+        undo_action.setShortcut('Ctrl+Z')
+        undo_action.triggered.connect(self.undo)
+        edit_menu.addAction(undo_action)
+        
+        redo_action = QAction('重做', self)
+        redo_action.setShortcut('Ctrl+Y')
+        redo_action.triggered.connect(self.redo)
+        edit_menu.addAction(redo_action)
+        
+        edit_menu.addSeparator()
+        
+        cut_action = QAction('剪切', self)
+        cut_action.setShortcut('Ctrl+X')
+        cut_action.triggered.connect(self.cut)
+        edit_menu.addAction(cut_action)
+        
+        copy_action = QAction('复制', self)
+        copy_action.setShortcut('Ctrl+C')
+        copy_action.triggered.connect(self.copy)
+        edit_menu.addAction(copy_action)
+        
+        paste_action = QAction('粘贴', self)
+        paste_action.setShortcut('Ctrl+V')
+        paste_action.triggered.connect(self.paste)
+        edit_menu.addAction(paste_action)
+        
+        # 视图菜单
+        view_menu = menubar.addMenu('视图')
+        
+        edit_mode_action = QAction('编辑模式', self)
+        edit_mode_action.setShortcut('F2')
+        edit_mode_action.triggered.connect(lambda: self.set_editing_mode(True))
+        view_menu.addAction(edit_mode_action)
+        
+        preview_mode_action = QAction('预览模式', self)
+        preview_mode_action.setShortcut('F3')
+        preview_mode_action.triggered.connect(lambda: self.set_editing_mode(False))
+        view_menu.addAction(preview_mode_action)
+        
+        split_mode_action = QAction('分屏模式', self)
+        split_mode_action.setShortcut('F4')
+        split_mode_action.triggered.connect(self.toggle_split_view)
+        view_menu.addAction(split_mode_action)
+        
+        # 帮助菜单
+        help_menu = menubar.addMenu('帮助')
+        
+        shortcuts_action = QAction('快捷键', self)
+        shortcuts_action.setShortcut('F1')
+        shortcuts_action.triggered.connect(self.show_help)
+        help_menu.addAction(shortcuts_action)
+        
+        help_menu.addSeparator()
+        
+        about_action = QAction('关于 MDPad', self)
+        about_action.triggered.connect(self.show_about)
+        help_menu.addAction(about_action)
+        
+    def create_toolbar(self):
+        """创建工具栏 - 精简版，只保留格式按钮"""
+        self.toolbar = QToolBar("格式工具栏")
+        self.toolbar.setMovable(False)
+        self.toolbar.setIconSize(QSize(20, 20))
+        
+        # 加粗
+        bold_action = QAction("B", self)
+        bold_action.setToolTip("加粗 (Ctrl+B)")
+        bold_action.setShortcut("Ctrl+B")
+        bold_action.triggered.connect(lambda: self.insert_formatting("**", "**"))
+        self.toolbar.addAction(bold_action)
+        
+        # 斜体
+        italic_action = QAction("I", self)
+        italic_action.setToolTip("斜体 (Ctrl+I)")
+        italic_action.setShortcut("Ctrl+I")
+        italic_action.triggered.connect(lambda: self.insert_formatting("*", "*"))
+        self.toolbar.addAction(italic_action)
+        
+        self.toolbar.addSeparator()
+        
+        # 标题
+        header_action = QAction("H", self)
+        header_action.setToolTip("插入标题")
+        header_action.triggered.connect(self.insert_header)
+        self.toolbar.addAction(header_action)
+        
+        # 链接
+        link_action = QAction("🔗", self)
+        link_action.setToolTip("插入链接 (Ctrl+L)")
+        link_action.setShortcut("Ctrl+L")
+        link_action.triggered.connect(self.insert_link)
+        self.toolbar.addAction(link_action)
+        
+        # 代码块
+        code_action = QAction("</>", self)
+        code_action.setToolTip("插入代码块 (Ctrl+K)")
+        code_action.setShortcut("Ctrl+K")
+        code_action.triggered.connect(self.insert_code_block)
+        self.toolbar.addAction(code_action)
+        
+    def create_editor_area(self):
+        """创建编辑器区域"""
+        self.editor_splitter = QSplitter(Qt.Horizontal)
+        
+        # 创建编辑器
+        self.text_edit = QTextEdit()
+        self.text_edit.setFont(QFont("Consolas", 11))
+        self.text_edit.textChanged.connect(self.update_preview)
+        self.text_edit.cursorPositionChanged.connect(self.update_cursor_position)
+        
+        # 创建预览窗口
+        self.preview = MarkdownPreview()
+        
+        # 添加到分割器
+        self.editor_splitter.addWidget(self.text_edit)
+        self.editor_splitter.addWidget(self.preview)
+        
+    def set_split_mode(self, enabled):
+        """设置分屏模式"""
+        self.split_mode = enabled
+        if enabled:
+            self.text_edit.show()
+            self.preview.show()
+            # 设置默认分割比例为1:1
+            self.editor_splitter.setSizes([int(self.width()/2), int(self.width()/2)])
+        else:
+            if self.editing_mode:
+                self.text_edit.show()
+                self.preview.hide()
+            else:
+                self.text_edit.hide()
+                self.preview.show()
+                
+    def update_cursor_position(self):
+        """更新光标位置显示"""
+        cursor = self.text_edit.textCursor()
+        line = cursor.blockNumber() + 1
+        column = cursor.columnNumber() + 1
+        self.cursor_position_label.setText(f"行: {line}, 列: {column}")
+        
+    def update_preview(self):
+        """更新预览内容"""
+        if self.preview.isVisible():
+            markdown_text = self.text_edit.toPlainText()
+            self.preview.update_preview(markdown_text)
+            
+    def set_editing_mode(self, editing):
+        """设置编辑模式"""
+        self.editing_mode = editing
+        self.split_mode = False
+        self.update_view_mode()
+        
+    def toggle_split_view(self):
+        """切换分屏模式"""
+        self.split_mode = not self.split_mode
+        self.update_view_mode()
+        
+    def update_view_mode(self):
+        """更新视图模式"""
+        if self.split_mode:
+            self.text_edit.show()
+            self.preview.show()
+            # 确保等分
+            total = self.text_edit.width() + self.preview.width()
+            if total > 0:
+                half = total // 2
+                self.editor_splitter.setSizes([half, half])
+        else:
+            if self.editing_mode:
+                self.text_edit.show()
+                self.preview.hide()
+            else:
+                self.text_edit.hide()
+                self.preview.show()
+                self.update_preview()
+                
+    def new_file(self):
+        """新建文件"""
+        if self.check_save_changes():
+            self.text_edit.clear()
+            self.current_file = None
+            self.setWindowTitle('MDPad - Markdown 编辑器')
+            self.status_bar.showMessage("已创建新文件", 3000)
+            
+    def open_file(self):
+        """打开文件"""
+        if self.check_save_changes():
+            file_path, _ = QFileDialog.getOpenFileName(
+                self, "打开Markdown文件", "", 
+                "Markdown文件 (*.md *.markdown *.txt);;所有文件 (*.*)"
+            )
+            if file_path:
+                self.load_file(file_path)
+                
+    def load_file(self, file_path):
+        """加载文件"""
+        try:
+            with open(file_path, 'r', encoding='utf-8') as file:
+                content = file.read()
+                self.text_edit.setPlainText(content)
+                self.current_file = file_path
+                self.setWindowTitle(f'MDPad - {os.path.basename(file_path)}')
+                self.status_bar.showMessage(f"已打开: {file_path}", 3000)
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"无法打开文件: {str(e)}")
+            
+    def save_file(self):
+        """保存文件"""
+        if self.current_file:
+            self.save_to_file(self.current_file)
+        else:
+            self.save_file_as()
+            
+    def save_file_as(self):
+        """另存为文件"""
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "保存Markdown文件", "", 
+            "Markdown文件 (*.md *.markdown);;文本文件 (*.txt);;所有文件 (*.*)"
+        )
+        if file_path:
+            if not any(file_path.endswith(ext) for ext in ['.md', '.markdown', '.txt']):
+                file_path += '.md'
+            self.save_to_file(file_path)
+            
+    def save_to_file(self, file_path):
+        """保存到指定文件"""
+        try:
+            with open(file_path, 'w', encoding='utf-8') as file:
+                file.write(self.text_edit.toPlainText())
+                self.current_file = file_path
+                self.setWindowTitle(f'MDPad - {os.path.basename(file_path)}')
+                self.status_bar.showMessage(f"已保存: {file_path}", 3000)
+                self.text_edit.document().setModified(False)
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"无法保存文件: {str(e)}")
+            
+    def export_html(self):
+        """导出为HTML"""
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "导出为HTML", "", 
+            "HTML文件 (*.html *.htm);;所有文件 (*.*)"
+        )
+        if file_path:
+            try:
+                markdown_text = self.text_edit.toPlainText()
+                html_content = markdown.markdown(markdown_text, extensions=['extra', 'codehilite', 'toc'])
+                
+                # 完整的HTML模板
+                html_template = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>MDPad 导出</title>
+    <style>
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+            line-height: 1.6;
+            color: #24292e;
+            background-color: #ffffff;
+            padding: 20px;
+            max-width: 800px;
+            margin: 0 auto;
+        }}
+        h1, h2, h3, h4, h5, h6 {{
+            margin-top: 24px;
+            margin-bottom: 16px;
+            font-weight: 600;
+            line-height: 1.25;
+        }}
+        h1 {{ font-size: 2em; border-bottom: 1px solid #eaecef; padding-bottom: 0.3em; }}
+        h2 {{ font-size: 1.5em; border-bottom: 1px solid #eaecef; padding-bottom: 0.3em; }}
+        h3 {{ font-size: 1.25em; }}
+        code {{
+            background-color: rgba(27,31,35,0.05);
+            border-radius: 3px;
+            padding: 0.2em 0.4em;
+            font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, Courier, monospace;
+        }}
+        pre {{
+            background-color: #f6f8fa;
+            border-radius: 3px;
+            padding: 16px;
+            overflow: auto;
+        }}
+        blockquote {{
+            border-left: 4px solid #dfe2e5;
+            padding-left: 16px;
+            color: #6a737d;
+            margin-left: 0;
+        }}
+        table {{
+            border-collapse: collapse;
+            width: 100%;
+        }}
+        th, td {{
+            border: 1px solid #dfe2e5;
+            padding: 6px 13px;
+        }}
+        th {{
+            background-color: #f6f8fa;
+        }}
+        a {{ color: #0366d6; text-decoration: none; }}
+        a:hover {{ text-decoration: underline; }}
+        img {{ max-width: 100%; }}
+    </style>
+</head>
+<body>
+    {html_content}
+</body>
+</html>"""
+                
+                with open(file_path, 'w', encoding='utf-8') as file:
+                    file.write(html_template)
+                self.status_bar.showMessage(f"已导出: {file_path}", 3000)
+            except Exception as e:
+                QMessageBox.critical(self, "错误", f"导出失败: {str(e)}")
+            
+    def check_save_changes(self):
+        """检查是否需要保存更改"""
+        if self.text_edit.document().isModified():
+            reply = QMessageBox.question(
+                self, '保存更改',
+                '文件已修改，是否保存更改？',
+                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel
+            )
+            if reply == QMessageBox.Yes:
+                self.save_file()
+                return True
+            elif reply == QMessageBox.No:
+                return True
+            else:
+                return False
+        return True
+        
+    def insert_formatting(self, prefix, suffix):
+        """插入格式标记"""
+        cursor = self.text_edit.textCursor()
+        if cursor.hasSelection():
+            selected_text = cursor.selectedText()
+            cursor.insertText(f"{prefix}{selected_text}{suffix}")
+        else:
+            cursor.insertText(f"{prefix}{suffix}")
+            cursor.movePosition(QTextCursor.Left, QTextCursor.MoveAnchor, len(suffix))
+            self.text_edit.setTextCursor(cursor)
+            
+    def insert_header(self):
+        """插入标题"""
+        cursor = self.text_edit.textCursor()
+        cursor.insertText("# ")
+        
+    def insert_link(self):
+        """插入链接"""
+        cursor = self.text_edit.textCursor()
+        if cursor.hasSelection():
+            selected_text = cursor.selectedText()
+            cursor.insertText(f"[{selected_text}](url)")
+            cursor.movePosition(QTextCursor.Left, QTextCursor.MoveAnchor, 5)
+        else:
+            cursor.insertText("[链接文本](url)")
+            cursor.movePosition(QTextCursor.Left, QTextCursor.MoveAnchor, 9)
+        self.text_edit.setTextCursor(cursor)
+        
+    def insert_code_block(self):
+        """插入代码块"""
+        cursor = self.text_edit.textCursor()
+        if cursor.hasSelection():
+            selected_text = cursor.selectedText()
+            cursor.insertText(f"```\n{selected_text}\n```\n")
+        else:
+            cursor.insertText("```\n\n```")
+            cursor.movePosition(QTextCursor.Up, QTextCursor.MoveAnchor, 1)
+        self.text_edit.setTextCursor(cursor)
+        
+    def undo(self):
+        """撤销操作"""
+        self.text_edit.undo()
+        
+    def redo(self):
+        """重做操作"""
+        self.text_edit.redo()
+        
+    def cut(self):
+        """剪切"""
+        self.text_edit.cut()
+        
+    def copy(self):
+        """复制"""
+        self.text_edit.copy()
+        
+    def paste(self):
+        """粘贴"""
+        self.text_edit.paste()
+        
+    def show_help(self):
+        """显示帮助对话框"""
+        help_dialog = HelpDialog(self)
+        help_dialog.exec_()
+        
+    def show_about(self):
+        """显示关于对话框"""
+        about_dialog = AboutDialog(self)
+        about_dialog.exec_()
+        
+    def load_settings(self):
+        """加载设置"""
+        self.settings = QSettings("MDPad", "Editor")
+        geometry = self.settings.value("geometry")
+        if geometry:
+            self.restoreGeometry(geometry)
+            
+        split_sizes = self.settings.value("split_sizes")
+        if split_sizes:
+            self.editor_splitter.setSizes([int(size) for size in split_sizes])
+            
+    def save_settings(self):
+        """保存设置"""
+        self.settings.setValue("geometry", self.saveGeometry())
+        self.settings.setValue("split_sizes", self.editor_splitter.sizes())
+        
+    def closeEvent(self, event):
+        """关闭事件处理"""
+        if self.check_save_changes():
+            self.save_settings()
+            event.accept()
+        else:
+            event.ignore()
+
+def main():
+    app = QApplication(sys.argv)
+    app.setApplicationName("MDPad")
+    app.setOrganizationName("MDPad")
+    app.setOrganizationDomain("mdpad.example.com")
+    
+    # 设置样式
+    app.setStyle("Fusion")
+    
+    # 创建必要的图标文件
+    icon_dir = os.path.dirname(__file__)
+    icon_path = os.path.join(icon_dir, "icon.ico")
+    
+    # 如果没有图标，可以创建默认的应用程序图标
+    if not os.path.exists(icon_path):
+        # 这里可以添加创建默认图标的代码，但为了简单起见，我们只是跳过
+        # 在实际应用中，您可以包含一个默认图标文件
+        pass
+    
+    # 创建编辑器
+    editor = MarkdownEditor()
+    
+    # 设置窗口图标
+    if os.path.exists(icon_path):
+        editor.setWindowIcon(QIcon(icon_path))
+    
+    editor.show()
+    
+    sys.exit(app.exec_())
+
+if __name__ == '__main__':
+    main()
