@@ -35,7 +35,7 @@ class AboutDialog(QDialog):
         layout.addWidget(title_label)
         
         # 版本信息
-        version_label = QLabel("版本 1.0.0")
+        version_label = QLabel("版本 1.1.0")
         version_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(version_label)
         
@@ -99,6 +99,8 @@ class HelpDialog(QDialog):
         edit_layout.addRow("重做", QLabel("Ctrl + Y 或 Ctrl + Shift + Z"))
         edit_layout.addRow("复制", QLabel("Ctrl + C"))
         edit_layout.addRow("粘贴", QLabel("Ctrl + V"))
+        edit_layout.addRow("插入单个换行标签", QLabel("Alt + Enter"))
+        edit_layout.addRow("为所有行添加换行标签", QLabel("Alt + Shift + Enter"))
         edit_layout.addRow("全选", QLabel("Ctrl + A"))
         edit_group.setLayout(edit_layout)
         shortcuts_layout.addWidget(edit_group)
@@ -133,7 +135,7 @@ class HelpDialog(QDialog):
         about_text.setPlainText("""
 MDPad Markdown 编辑器
 
-版本: 1.0.0
+版本: 1.1.0
 构建日期: 2026年3月
 
 功能特性:
@@ -143,6 +145,8 @@ MDPad Markdown 编辑器
 - 导出 HTML
 - 自定义主题
 - 快捷键支持
+- 拖放打开文件
+- 自动添加换行标签
 
 技术栈:
 - Python 3.x
@@ -344,6 +348,13 @@ class MarkdownPreview(QWebEngineView):
                         vertical-align: middle;
                     }}
                     
+                    /* 换行标签样式 */
+                    br {{
+                        display: block;
+                        content: "";
+                        margin-top: 0.5em;
+                    }}
+                    
                     /* 代码高亮 */
                     .codehilite .hll {{ background-color: #ffffcc }}
                     .codehilite  {{ background: #f8f8f8; }}
@@ -438,13 +449,12 @@ class MarkdownEditor(QMainWindow):
         self.setAcceptDrops(True)
         
     def dragEnterEvent(self, event: QDragEnterEvent):
-        """处理拖放进入事件，验证文件类型"""
+        """处理拖放进入事件，接受所有文件类型"""
         if event.mimeData().hasUrls():
-            # 检查是否有.md或.txt文件
             urls = event.mimeData().urls()
             for url in urls:
                 file_path = url.toLocalFile()
-                if file_path and (file_path.lower().endswith(('.md', '.markdown', '.txt'))):
+                if file_path:  # 只要文件路径有效就接受
                     event.acceptProposedAction()
                     return
         event.ignore()
@@ -472,12 +482,15 @@ class MarkdownEditor(QMainWindow):
                                       f"拖放的不是一个文件:\n{file_path}")
                     return
                 
-                # 检查文件扩展名
-                if not file_path.lower().endswith(('.md', '.markdown', '.txt')):
+                # 检查文件扩展名，如果是非Markdown文件则提示
+                file_ext = os.path.splitext(file_path)[1].lower()
+                if file_ext not in ['.md', '.markdown', '.txt']:
                     reply = QMessageBox.question(
                         self, '打开文件',
-                        f'文件"{os.path.basename(file_path)}"可能不是Markdown文件。\n是否仍然尝试打开？',
-                        QMessageBox.Yes | QMessageBox.No
+                        f'您拖放的文件 "{os.path.basename(file_path)}" 不是标准的Markdown文件 (扩展名: {file_ext})。\n\n'
+                        'Markdown文件通常以 .md、.markdown 或 .txt 结尾。\n\n'
+                        '您仍然想要打开此文件吗？',
+                        QMessageBox.Yes | QMessageBox.No, QMessageBox.No
                     )
                     if reply != QMessageBox.Yes:
                         return
@@ -603,6 +616,9 @@ class MarkdownEditor(QMainWindow):
         paste_action.triggered.connect(self.paste)
         edit_menu.addAction(paste_action)
         
+        # 从菜单栏移除换行功能，移至工具栏
+        # 注意：我们不再在菜单栏添加换行功能
+        
         # 视图菜单
         view_menu = menubar.addMenu('视图')
         
@@ -636,8 +652,8 @@ class MarkdownEditor(QMainWindow):
         help_menu.addAction(about_action)
         
     def create_toolbar(self):
-        """创建工具栏 - 精简版，只保留格式按钮"""
-        self.toolbar = QToolBar("格式工具栏")
+        """创建工具栏 - 包含格式按钮和换行按钮"""
+        self.toolbar = QToolBar("主工具栏")
         self.toolbar.setMovable(False)
         self.toolbar.setIconSize(QSize(20, 20))
         
@@ -677,6 +693,22 @@ class MarkdownEditor(QMainWindow):
         code_action.triggered.connect(self.insert_code_block)
         self.toolbar.addAction(code_action)
         
+        self.toolbar.addSeparator()
+        
+        # 单个换行标签按钮
+        single_linebreak_action = QAction("↩", self)
+        single_linebreak_action.setToolTip("插入单个换行标签<br> (Alt+Enter)")
+        single_linebreak_action.setShortcut("Alt+Enter")
+        single_linebreak_action.triggered.connect(self.insert_single_linebreak)
+        self.toolbar.addAction(single_linebreak_action)
+        
+        # 全部添加换行标签按钮
+        all_linebreaks_action = QAction("⏎⏎", self)
+        all_linebreaks_action.setToolTip("为所有行添加换行标签<br> (Alt+Shift+Enter)")
+        all_linebreaks_action.setShortcut("Alt+Shift+Enter")
+        all_linebreaks_action.triggered.connect(self.insert_all_linebreaks)
+        self.toolbar.addAction(all_linebreaks_action)
+        
     def create_editor_area(self):
         """创建编辑器区域"""
         self.editor_splitter = QSplitter(Qt.Horizontal)
@@ -700,6 +732,80 @@ class MarkdownEditor(QMainWindow):
         
         # 关键修改3：确保分割器本身也不会拦截拖放事件
         self.editor_splitter.setAcceptDrops(False)      
+    
+    def insert_single_linebreak(self):
+        """在当前光标位置插入单个换行标签 <br>"""
+        cursor = self.text_edit.textCursor()
+        
+        # 开始一个编辑操作，以便可以撤销
+        cursor.beginEditBlock()
+        
+        # 在光标处插入HTML换行标签
+        cursor.insertText("<br>")
+        
+        # 结束编辑操作
+        cursor.endEditBlock()
+        
+        # 将新光标位置设置回编辑器
+        self.text_edit.setTextCursor(cursor)
+        # 触发预览更新
+        self.update_preview()
+        self.status_bar.showMessage("已在光标位置插入换行标签 <br> (可按 Ctrl+Z 撤销)", 2000)
+
+    def insert_all_linebreaks(self):
+        """在每一行末尾自动添加换行标签 <br>，并支持撤销/重做"""
+        # 获取当前文档的全部文本
+        current_text = self.text_edit.toPlainText()
+        
+        # 如果文本为空，直接返回
+        if not current_text.strip():
+            self.status_bar.showMessage("文档为空，无需添加换行标签", 2000)
+            return
+        
+        # 获取文档和光标
+        cursor = self.text_edit.textCursor()
+        
+        # 开始一个编辑块，这样整个操作可以一次性撤销/重做
+        cursor.beginEditBlock()
+        
+        # 保存原始光标位置
+        original_position = cursor.position()
+        
+        try:
+            # 计算新文本
+            lines = current_text.splitlines()
+            new_lines = []
+            
+            for i, line in enumerate(lines):
+                # 在每一行末尾添加 <br> 标签
+                new_line = line + "<br>"
+                new_lines.append(new_line)
+            
+            # 重新组合文本
+            new_text = "\n".join(new_lines)
+            
+            # 替换整个文档内容
+            cursor.select(QTextCursor.Document)
+            cursor.removeSelectedText()
+            cursor.insertText(new_text)
+            
+            # 恢复光标位置
+            cursor.setPosition(min(original_position, len(new_text)))
+            
+        except Exception as e:
+            QMessageBox.warning(self, "操作失败", f"添加换行标签时出错: {str(e)}")
+            cursor.endEditBlock()  # 结束编辑块
+            return
+        
+        # 结束编辑块
+        cursor.endEditBlock()
+        
+        # 更新编辑器光标
+        self.text_edit.setTextCursor(cursor)
+        
+        # 触发预览更新
+        self.update_preview()
+        self.status_bar.showMessage("已在每一行末尾添加了换行标签 <br> (可按 Ctrl+Z 撤销)", 3000)
     
     def set_split_mode(self, enabled):
         """设置分屏模式"""
@@ -770,26 +876,56 @@ class MarkdownEditor(QMainWindow):
             self.status_bar.showMessage("已创建新文件", 3000)
             
     def open_file(self):
-        """打开文件"""
+        """打开文件 - 不限制文件类型"""
         if self.check_save_changes():
-            file_path, _ = QFileDialog.getOpenFileName(
-                self, "打开Markdown文件", "", 
-                "Markdown文件 (*.md *.markdown *.txt);;所有文件 (*.*)"
+            file_path, selected_filter = QFileDialog.getOpenFileName(
+                self, "打开文件", "", 
+                "所有文件 (*.*);;Markdown文件 (*.md *.markdown *.txt)"
             )
             if file_path:
+                # 检查文件扩展名，如果是非Markdown文件则提示
+                file_ext = os.path.splitext(file_path)[1].lower()
+                if file_ext not in ['.md', '.markdown', '.txt']:
+                    reply = QMessageBox.question(
+                        self, '打开文件',
+                        f'您选择的文件 "{os.path.basename(file_path)}" 不是标准的Markdown文件 (扩展名: {file_ext})。\n\n'
+                        'Markdown文件通常以 .md、.markdown 或 .txt 结尾。\n\n'
+                        '您仍然想要打开此文件吗？',
+                        QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+                    )
+                    if reply != QMessageBox.Yes:
+                        return
+                
                 self.load_file(file_path)
                 
     def load_file(self, file_path):
         """加载文件"""
         try:
-            with open(file_path, 'r', encoding='utf-8') as file:
-                content = file.read()
-                self.text_edit.setPlainText(content)
-                self.current_file = file_path
-                self.setWindowTitle(f'MDPad - {os.path.basename(file_path)}')
-                self.status_bar.showMessage(f"已打开: {file_path}", 3000)
-                # 强制更新预览，无论其当前是否可见
-                self.preview.update_preview(content)
+            # 尝试多种编码
+            encodings = ['utf-8', 'gbk', 'gb2312', 'gb18030', 'big5', 'latin-1']
+            content = None
+            
+            for encoding in encodings:
+                try:
+                    with open(file_path, 'r', encoding=encoding) as file:
+                        content = file.read()
+                    break
+                except UnicodeDecodeError:
+                    continue
+            
+            if content is None:
+                # 如果所有编码都失败，尝试二进制读取
+                with open(file_path, 'rb') as file:
+                    binary_data = file.read()
+                    # 尝试解码为文本，忽略错误
+                    content = binary_data.decode('utf-8', errors='ignore')
+            
+            self.text_edit.setPlainText(content)
+            self.current_file = file_path
+            self.setWindowTitle(f'MDPad - {os.path.basename(file_path)}')
+            self.status_bar.showMessage(f"已打开: {file_path}", 3000)
+            # 强制更新预览，无论其当前是否可见
+            self.preview.update_preview(content)
         except Exception as e:
             QMessageBox.critical(self, "错误", f"无法打开文件: {str(e)}")
             
@@ -891,6 +1027,11 @@ class MarkdownEditor(QMainWindow):
         a {{ color: #0366d6; text-decoration: none; }}
         a:hover {{ text-decoration: underline; }}
         img {{ max-width: 100%; }}
+        br {{
+            display: block;
+            content: "";
+            margin-top: 0.5em;
+        }}
     </style>
 </head>
 <body>
@@ -1048,18 +1189,18 @@ def main():
         file_to_open = sys.argv[1]
         # 检查文件是否存在且是有效文件
         if os.path.isfile(file_to_open):
-            # 检查文件扩展名是否为支持的Markdown格式
-            supported_extensions = ('.md', '.markdown', '.txt')
-            if file_to_open.lower().endswith(supported_extensions):
-                # 通过现有的方法加载文件
-                editor.load_file(file_to_open)
-            else:
-                # 如果不是支持的格式，可以给出提示或尝试打开
+            # 检查文件扩展名，如果是非Markdown文件则提示
+            file_ext = os.path.splitext(file_to_open)[1].lower()
+            if file_ext not in ['.md', '.markdown', '.txt']:
                 reply = QMessageBox.question(editor, '打开文件',
-                                           f'文件"{os.path.basename(file_to_open)}"可能不是标准的Markdown文件。\n是否仍然尝试打开？',
+                                           f'文件"{os.path.basename(file_to_open)}"不是标准的Markdown文件 (扩展名: {file_ext})。\n\n'
+                                           'Markdown文件通常以 .md、.markdown 或 .txt 结尾。\n\n'
+                                           '您仍然想要打开此文件吗？',
                                            QMessageBox.Yes | QMessageBox.No)
-                if reply == QMessageBox.Yes:
-                    editor.load_file(file_to_open)
+                if reply != QMessageBox.Yes:
+                    sys.exit(0)
+            # 通过现有的方法加载文件
+            editor.load_file(file_to_open)
         else:
             QMessageBox.warning(editor, "文件未找到", f"无法找到文件：{file_to_open}")
     # --- 参数处理结束 ---
