@@ -9,12 +9,14 @@ from PyQt5.QtWidgets import (
     QDialog, QDialogButtonBox, QFormLayout, QSpinBox, QFontComboBox,
     QCheckBox, QTextBrowser
 )
-from PyQt5.QtCore import Qt, QUrl, QSize, QSettings, QMimeData
+from PyQt5.QtCore import Qt, QUrl, QSize, QSettings, QMimeData, QTimer
 from PyQt5.QtGui import QFont, QTextCursor, QKeySequence, QIcon, QColor, QPixmap, QDragEnterEvent, QDropEvent
 from PyQt5.QtWebEngineWidgets import QWebEngineView
 import markdown
 import markdown.extensions
 import html
+import requests
+import json
 
 class AboutDialog(QDialog):
     """关于对话框"""
@@ -147,6 +149,7 @@ MDPad Markdown 编辑器
 - 快捷键支持
 - 拖放打开文件
 - 自动添加换行标签
+- AI智能文件名总结
 
 技术栈:
 - Python 3.x
@@ -442,6 +445,9 @@ class MarkdownEditor(QMainWindow):
         self.current_file = None
         self.split_mode = True  # 默认分屏模式
         self.editing_mode = True
+        # 新增：设置AI API
+        self.API_KEY = "e7509fc557394a619bc89d9bc44172ce.qY4uSyCofHoCfQSX"  # 用户提供的API密钥
+        self.API_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions"  # 根据用户提供的URL基础补全
         self.init_ui()
         self.load_settings()
         
@@ -807,6 +813,72 @@ class MarkdownEditor(QMainWindow):
         self.update_preview()
         self.status_bar.showMessage("已在每一行末尾添加了换行标签 <br> (可按 Ctrl+Z 撤销)", 3000)
     
+    def generate_filename_with_ai(self, content):
+        """
+        调用AI API，根据文档内容生成10个字以内的默认文件名。
+        
+        参数:
+            content: 文档的文本内容
+            
+        返回:
+            成功: 生成的简短文件名 (不包含扩展名)
+            失败: 返回 None
+        """
+        if not content or not content.strip():
+            return None
+            
+        # 准备API请求
+        prompt = f"""
+        请将以下文本内容总结成一个10个中文字以内的短标题，用于作为文件名。不要包含任何标点符号、引号或文件扩展名。\n
+        文本内容：\n{content[:2000]}  # 限制输入长度
+        """
+        
+        headers = {
+            "Authorization": f"Bearer {self.API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "model": "glm-4-flash",  # 使用一个通用模型，您可以根据需要修改
+            "messages": [
+                {"role": "system", "content": "你是一个文件命名助手，请根据内容生成简洁的标题，不超过10个字。"},
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": 0.3,
+            "max_tokens": 20
+        }
+        
+        try:
+            self.status_bar.showMessage("正在通过AI生成文件名...", 3000)
+            response = requests.post(self.API_URL, headers=headers, json=payload, timeout=10)
+            response.raise_for_status()  # 检查HTTP错误
+            
+            data = response.json()
+            ai_response = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+            
+            # 清理响应，移除引号、句号等，并确保长度
+            cleaned_name = ai_response.replace('"', '').replace("'", "").replace("。", "").replace(".", "")
+            # 如果AI返回了过长的内容，截取前10个字符
+            if len(cleaned_name) > 10:
+                cleaned_name = cleaned_name[:10]
+                
+            if cleaned_name:
+                self.status_bar.showMessage(f"AI建议文件名: {cleaned_name}", 3000)
+                return cleaned_name
+            else:
+                self.status_bar.showMessage("AI未返回有效的文件名", 2000)
+                return None
+                
+        except requests.exceptions.Timeout:
+            QMessageBox.warning(self, "AI调用超时", "请求AI服务超时，将使用默认文件名。")
+            return None
+        except requests.exceptions.RequestException as e:
+            QMessageBox.warning(self, "AI调用失败", f"无法连接到AI服务: {str(e)}")
+            return None
+        except Exception as e:
+            QMessageBox.warning(self, "AI处理错误", f"处理AI响应时出错: {str(e)}")
+            return None
+    
     def set_split_mode(self, enabled):
         """设置分屏模式"""
         self.split_mode = enabled
@@ -934,17 +1006,36 @@ class MarkdownEditor(QMainWindow):
         if self.current_file:
             self.save_to_file(self.current_file)
         else:
-            self.save_file_as()
+            self.save_file_as()  # 如果没有文件名，则调用另存为
             
     def save_file_as(self):
         """另存为文件"""
+        # 新增：在打开对话框前，尝试调用AI生成默认文件名
+        default_name = None
+        content = self.text_edit.toPlainText()
+        if content and content.strip():
+            # 调用AI生成文件名建议
+            default_name = self.generate_filename_with_ai(content)
+        
+        # 准备初始文件名
+        initial_file = ""
+        if default_name:
+            initial_file = default_name + ".md"
+        elif self.current_file:
+            # 如果已有文件名，使用原文件名
+            initial_file = os.path.basename(self.current_file)
+        else:
+            # 否则使用默认的"无标题"
+            initial_file = "无标题.md"
+        
         file_path, _ = QFileDialog.getSaveFileName(
-            self, "保存Markdown文件", "", 
+            self, "保存Markdown文件", initial_file,  # 使用AI生成的文件名作为初始建议
             "Markdown文件 (*.md *.markdown);;文本文件 (*.txt);;所有文件 (*.*)"
         )
         if file_path:
             if not any(file_path.endswith(ext) for ext in ['.md', '.markdown', '.txt']):
                 file_path += '.md'
+            # 关键修正：调用 save_to_file 来实际保存文件
             self.save_to_file(file_path)
             
     def save_to_file(self, file_path):
@@ -961,8 +1052,31 @@ class MarkdownEditor(QMainWindow):
             
     def export_html(self):
         """导出为HTML"""
+        # 新增：在打开对话框前，尝试调用AI生成默认文件名
+        default_name = None
+        content = self.text_edit.toPlainText()
+        if content and content.strip():
+            # 调用AI生成文件名建议
+            default_name = self.generate_filename_with_ai(content)
+        
+        # 准备初始文件名
+        initial_file = ""
+        if default_name:
+            # 为HTML文件使用 .html 后缀
+            initial_file = default_name + ".html"
+        elif self.current_file:
+            # 如果已有Markdown文件名，则在其基础上修改后缀
+            base_name = os.path.splitext(os.path.basename(self.current_file))[0]
+            initial_file = base_name + ".html"
+        else:
+            # 否则使用默认的“导出文档”
+            initial_file = "导出文档.html"
+        
+        # 在文件对话框中应用初始文件名
         file_path, _ = QFileDialog.getSaveFileName(
-            self, "导出为HTML", "", 
+            self, 
+            "导出为HTML", 
+            initial_file,  # 使用AI生成或推导的文件名作为初始建议
             "HTML文件 (*.html *.htm);;所有文件 (*.*)"
         )
         if file_path:
