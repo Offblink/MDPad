@@ -1,6 +1,7 @@
 import sys
 import os
 import webbrowser
+import re
 from pathlib import Path
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -103,6 +104,8 @@ class HelpDialog(QDialog):
         edit_layout.addRow("粘贴", QLabel("Ctrl + V"))
         edit_layout.addRow("插入单个换行标签", QLabel("Alt + Enter"))
         edit_layout.addRow("为所有行添加换行标签", QLabel("Alt + Shift + Enter"))
+        edit_layout.addRow("插入单个空格", QLabel("Ctrl + Space"))
+        edit_layout.addRow("补全所有空格", QLabel("Ctrl + Shift + Space"))
         edit_layout.addRow("全选", QLabel("Ctrl + A"))
         edit_group.setLayout(edit_layout)
         shortcuts_layout.addWidget(edit_group)
@@ -149,6 +152,7 @@ MDPad Markdown 编辑器
 - 快捷键支持
 - 拖放打开文件
 - 自动添加换行标签
+- 智能空格替换 (按奇偶规则)
 - AI智能文件名总结
 
 技术栈:
@@ -625,6 +629,21 @@ class MarkdownEditor(QMainWindow):
         # 从菜单栏移除换行功能，移至工具栏
         # 注意：我们不再在菜单栏添加换行功能
         
+        # 新增：空格功能菜单项
+        edit_menu.addSeparator()
+        
+        # 单个空格
+        insert_single_nbsp_action = QAction('插入单个空格', self)
+        insert_single_nbsp_action.setShortcut('Ctrl+Space')
+        insert_single_nbsp_action.triggered.connect(self.insert_single_nbsp)
+        edit_menu.addAction(insert_single_nbsp_action)
+        
+        # 补全所有空格
+        replace_all_spaces_action = QAction('补全所有空格', self)
+        replace_all_spaces_action.setShortcut('Ctrl+Shift+Space')
+        replace_all_spaces_action.triggered.connect(self.replace_all_spaces)
+        edit_menu.addAction(replace_all_spaces_action)
+        
         # 视图菜单
         view_menu = menubar.addMenu('视图')
         
@@ -658,7 +677,7 @@ class MarkdownEditor(QMainWindow):
         help_menu.addAction(about_action)
         
     def create_toolbar(self):
-        """创建工具栏 - 包含格式按钮和换行按钮"""
+        """创建工具栏 - 包含格式按钮、换行按钮和空格按钮"""
         self.toolbar = QToolBar("主工具栏")
         self.toolbar.setMovable(False)
         self.toolbar.setIconSize(QSize(20, 20))
@@ -715,6 +734,22 @@ class MarkdownEditor(QMainWindow):
         all_linebreaks_action.triggered.connect(self.insert_all_linebreaks)
         self.toolbar.addAction(all_linebreaks_action)
         
+        self.toolbar.addSeparator()
+        
+        # 单个空格按钮
+        single_nbsp_action = QAction("␣", self)
+        single_nbsp_action.setToolTip("插入单个空格 &nbsp; (Ctrl+Space)")
+        single_nbsp_action.setShortcut("Ctrl+Space")
+        single_nbsp_action.triggered.connect(self.insert_single_nbsp)
+        self.toolbar.addAction(single_nbsp_action)
+        
+        # 补全所有空格按钮
+        all_nbsp_action = QAction("␣␣", self)
+        all_nbsp_action.setToolTip("将所有普通空格按奇偶规则替换 (Ctrl+Shift+Space)")
+        all_nbsp_action.setShortcut("Ctrl+Shift+Space")
+        all_nbsp_action.triggered.connect(self.replace_all_spaces)
+        self.toolbar.addAction(all_nbsp_action)
+        
     def create_editor_area(self):
         """创建编辑器区域"""
         self.editor_splitter = QSplitter(Qt.Horizontal)
@@ -738,7 +773,7 @@ class MarkdownEditor(QMainWindow):
         
         # 关键修改3：确保分割器本身也不会拦截拖放事件
         self.editor_splitter.setAcceptDrops(False)      
-    
+        
     def insert_single_linebreak(self):
         """在当前光标位置插入单个换行标签 <br>"""
         cursor = self.text_edit.textCursor()
@@ -757,7 +792,7 @@ class MarkdownEditor(QMainWindow):
         # 触发预览更新
         self.update_preview()
         self.status_bar.showMessage("已在光标位置插入换行标签 <br> (可按 Ctrl+Z 撤销)", 2000)
-
+    
     def insert_all_linebreaks(self):
         """在每一行末尾自动添加换行标签 <br>，并支持撤销/重做"""
         # 获取当前文档的全部文本
@@ -812,6 +847,102 @@ class MarkdownEditor(QMainWindow):
         # 触发预览更新
         self.update_preview()
         self.status_bar.showMessage("已在每一行末尾添加了换行标签 <br> (可按 Ctrl+Z 撤销)", 3000)
+    
+    def insert_single_nbsp(self):
+        """在当前光标位置插入单个空格实体 &nbsp;"""
+        cursor = self.text_edit.textCursor()
+        
+        # 开始一个编辑操作，以便可以撤销
+        cursor.beginEditBlock()
+        
+        # 在光标处插入HTML空格实体
+        cursor.insertText("&nbsp;")
+        
+        # 结束编辑操作
+        cursor.endEditBlock()
+        
+        # 将新光标位置设置回编辑器
+        self.text_edit.setTextCursor(cursor)
+        # 触发预览更新
+        self.update_preview()
+        self.status_bar.showMessage("已在光标位置插入空格 &nbsp; (可按 Ctrl+Z 撤销)", 2000)
+    
+    def replace_all_spaces(self):
+        """按照奇偶规则将文档中连续多个空格替换为HTML空格实体"""
+        # 获取当前文档的全部文本
+        current_text = self.text_edit.toPlainText()
+        
+        # 如果文本为空，直接返回
+        if not current_text.strip():
+            self.status_bar.showMessage("文档为空，无需替换空格", 2000)
+            return
+        
+        # 统计处理情况
+        processed_groups = 0
+        replaced_spaces = 0
+        
+        # 获取文档和光标
+        cursor = self.text_edit.textCursor()
+        
+        # 开始一个编辑块，这样整个操作可以一次性撤销/重做
+        cursor.beginEditBlock()
+        
+        # 保存原始光标位置
+        original_position = cursor.position()
+        
+        try:
+            # 定义替换函数
+            def replace_space_match(match):
+                nonlocal processed_groups, replaced_spaces
+                spaces = match.group(0)
+                n = len(spaces)
+                
+                # 单个空格不替换
+                if n == 1:
+                    return spaces
+                
+                processed_groups += 1
+                replaced_spaces += n
+                
+                # 奇偶规则处理
+                if n % 2 == 1:  # 奇数
+                    emsp_count = (n - 1) // 2
+                    return "&emsp;" * emsp_count + "&nbsp;"
+                else:  # 偶数
+                    emsp_count = n // 2
+                    return "&emsp;" * emsp_count
+            
+            # 使用正则表达式找到所有连续的空格（至少2个）
+            new_text = re.sub(r' {2,}', replace_space_match, current_text)
+            
+            # 如果没有处理任何连续空格
+            if processed_groups == 0:
+                self.status_bar.showMessage("文档中没有连续多个空格，无需替换", 2000)
+                cursor.endEditBlock()
+                return
+            
+            # 替换整个文档内容
+            cursor.select(QTextCursor.Document)
+            cursor.removeSelectedText()
+            cursor.insertText(new_text)
+            
+            # 恢复光标位置
+            cursor.setPosition(min(original_position, len(new_text)))
+            
+        except Exception as e:
+            QMessageBox.warning(self, "操作失败", f"替换空格时出错: {str(e)}")
+            cursor.endEditBlock()  # 结束编辑块
+            return
+        
+        # 结束编辑块
+        cursor.endEditBlock()
+        
+        # 更新编辑器光标
+        self.text_edit.setTextCursor(cursor)
+        
+        # 触发预览更新
+        self.update_preview()
+        self.status_bar.showMessage(f"已按奇偶规则处理了 {processed_groups} 组连续空格，共 {replaced_spaces} 个空格 (可按 Ctrl+Z 撤销)", 3000)
     
     def generate_filename_with_ai(self, content):
         """
@@ -1069,7 +1200,7 @@ class MarkdownEditor(QMainWindow):
             base_name = os.path.splitext(os.path.basename(self.current_file))[0]
             initial_file = base_name + ".html"
         else:
-            # 否则使用默认的“导出文档”
+            # 否则使用默认的"导出文档"
             initial_file = "导出文档.html"
         
         # 在文件对话框中应用初始文件名
