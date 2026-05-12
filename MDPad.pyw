@@ -12,7 +12,7 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt, QUrl, QSize, QSettings, QMimeData, QTimer
 from PyQt5.QtGui import QFont, QTextCursor, QKeySequence, QIcon, QColor, QPixmap, QDragEnterEvent, QDropEvent
-from PyQt5.QtWebEngineWidgets import QWebEngineView
+from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEnginePage
 import markdown
 import markdown.extensions
 import html
@@ -181,14 +181,28 @@ MDPad Markdown 编辑器
         layout.addWidget(buttons)
         self.setLayout(layout)
 
+class PreviewWebEnginePage(QWebEnginePage):
+    """自定义WebEnginePage，用于拦截外部链接"""
+    def acceptNavigationRequest(self, url, _type, is_main_frame):
+        # 只允许导航到我们自己的预览内容（空URL或data URL）
+        url_str = url.toString()
+        if url_str == "" or url_str.startswith("data:"):
+            return True
+        # 外部链接在系统浏览器中打开
+        webbrowser.open(url_str)
+        return False
+
 class MarkdownPreview(QWebEngineView):
     """Markdown预览组件"""
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setContextMenuPolicy(Qt.NoContextMenu)
+        # 设置自定义页面来拦截外部链接
+        self.setPage(PreviewWebEnginePage(self))
         # 初始化时加载一个基本的HTML框架，包含样式
         self._is_initialized = False
         self._pending_update = None
+        self._current_markdown = ""
         
         # 基本HTML模板，只包含样式，内容为空
         self._base_html = """
@@ -486,6 +500,7 @@ class MarkdownPreview(QWebEngineView):
     
     def update_preview(self, markdown_text):
         """更新预览内容"""
+        self._current_markdown = markdown_text
         try:
             # 使用多个扩展
             extensions = [
@@ -516,6 +531,17 @@ class MarkdownPreview(QWebEngineView):
                 self.setHtml(f"<html><body>{error_html}</body></html>")
             else:
                 self._update_content_with_js(error_html)
+    
+    def refresh_preview(self):
+        """刷新预览，重新渲染markdown"""
+        if self._current_markdown:
+            # 检查当前页面是否已经导航到外部URL
+            current_url = self.url().toString()
+            # 如果URL不是空的或者不是我们的本地预览页面，则需要完全重新加载
+            if current_url != "" and not current_url.startswith("data:") and not current_url.startswith("about:"):
+                # 重新初始化，强制重新加载HTML框架
+                self._is_initialized = False
+            self.update_preview(self._current_markdown)
 
 class MarkdownEditor(QMainWindow):
     def __init__(self):
@@ -756,6 +782,16 @@ class MarkdownEditor(QMainWindow):
         self.toolbar.setMovable(False)
         self.toolbar.setIconSize(QSize(20, 20))
         
+        # 返回预览按钮
+        back_action = QAction("←", self)
+        back_action.setToolTip("返回预览/刷新 (Alt+←)")
+        back_action.setShortcut("Alt+Left")
+        back_action.triggered.connect(self.go_back_to_preview)
+        self.back_action = back_action
+        self.toolbar.addAction(back_action)
+        
+        self.toolbar.addSeparator()
+        
         # 加粗
         bold_action = QAction("B", self)
         bold_action.setToolTip("加粗 (Ctrl+B)")
@@ -838,6 +874,8 @@ class MarkdownEditor(QMainWindow):
         
         # 创建预览窗口
         self.preview = MarkdownPreview()
+        # 设置父引用，用于回调
+        self.preview._parent = self
         # 关键修改2：禁止预览组件本身接受拖放，让事件传递给父窗口
         self.preview.setAcceptDrops(False)
         
@@ -1113,6 +1151,12 @@ class MarkdownEditor(QMainWindow):
         if self.preview.isVisible():
             markdown_text = self.text_edit.toPlainText()
             self.preview.update_preview(markdown_text)
+    
+    def go_back_to_preview(self):
+        """返回预览界面 - 刷新当前markdown内容"""
+        if hasattr(self, 'preview') and hasattr(self.preview, 'refresh_preview'):
+            self.preview.refresh_preview()
+            self.status_bar.showMessage("已刷新预览", 2000)
             
     def set_editing_mode(self, editing):
         """设置编辑模式"""
