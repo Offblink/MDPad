@@ -1,0 +1,4 @@
+PyQt5>=5.15
+PyQtWebEngine>=5.15
+markdown>=3.4
+requests>=2.28
