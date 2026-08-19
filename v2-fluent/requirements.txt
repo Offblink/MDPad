@@ -1,0 +1,5 @@
+PyQt5>=5.15
+PyQtWebEngine>=5.15
+PyQt-Fluent-Widgets>=1.11
+markdown>=3.4
+requests>=2.28
