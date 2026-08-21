@@ -1,0 +1,73 @@
+name: Build & Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag，例如 v2.0.0'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.app }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - app: v1-pyqt
+            exe: MDPad-v1-win64.exe
+          - app: v2-fluent
+            exe: MDPad-v2-win64.exe
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: ${{ matrix.app }}/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          pip install -r ${{ matrix.app }}/requirements.txt
+
+      - name: Build exe with PyInstaller
+        run: |
+          cd ${{ matrix.app }}/pack
+          pyinstaller MDPad.spec
+
+      - name: Rename artifact
+        shell: bash
+        run: mv "${{ matrix.app }}/pack/dist/MDPad.exe" "${{ matrix.app }}/pack/dist/${{ matrix.exe }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: exe-${{ matrix.app }}
+          path: ${{ matrix.app }}/pack/dist/${{ matrix.exe }}
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: exe-*
+          path: exes
+          merge-multiple: true
+
+      - name: Create/Update release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || '' }}
+          files: exes/*.exe
+          generate_release_notes: true
+          update_release: true
