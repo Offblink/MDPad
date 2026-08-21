@@ -244,6 +244,7 @@ class MainWindow(QMainWindow):
 
     def open_path(self, file_path):
         """打开命令行/文件关联传入的路径（含非 Markdown 扩展名确认）。"""
+        file_path = os.path.abspath(file_path)  # 关联/相对路径兜底
         if not self.check_save_changes():
             return
         ext = os.path.splitext(file_path)[1].lower()

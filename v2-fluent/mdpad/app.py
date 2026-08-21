@@ -23,9 +23,10 @@ def create_app(argv=None):
 
 def run(argv=None):
     """启动主窗口；支持命令行参数打开文件（如右键"打开方式"）。"""
+    argv = argv if argv is not None else sys.argv
     app = create_app(argv)
     window = MainWindow()
     window.show()
-    if len(sys.argv) > 1 and os.path.isfile(sys.argv[1]):
-        window.open_path(sys.argv[1])
+    if len(argv) > 1 and os.path.isfile(argv[1]):
+        window.open_path(argv[1])
     return app.exec_()
