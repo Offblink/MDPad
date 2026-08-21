@@ -68,4 +68,3 @@ jobs:
           tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || '' }}
           files: exes/*.exe
           generate_release_notes: true
-          update_release: true
