@@ -20,8 +20,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - app: v1-pyqt
-            exe: MDPad-v1-win64.exe
           - app: v2-fluent
             exe: MDPad-v2-win64.exe
     steps:
