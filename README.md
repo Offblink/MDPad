@@ -39,6 +39,10 @@ python v2-fluent/MDPad.pyw 文档.md    # 启动并打开文件
 
 双击 `v2-fluent/MDPad.pyw` 也可直接运行。
 
+> 依赖注意：`qfluentwidgets` 对应 PyQt5 版的 PyPI 包名是 `PyQt-Fluent-Widgets`（requirements.txt 已锁定）。
+> 若再安装 `PyQt6-Fluent-Widgets`，两者共用 `qfluentwidgets` 包名会互相覆盖，启动时报错
+> `TypeError: QToolButton(...): argument 1 has unexpected type 'QWidget'`；重装 `pip install "PyQt-Fluent-Widgets>=1.11"` 即可恢复。
+
 ## 功能特性
 
 - 实时 Markdown 预览（GitHub 风格）
@@ -67,5 +71,6 @@ python v2-fluent/MDPad.pyw 文档.md    # 启动并打开文件
 
 ## 更新记录
 
+- **v1.3.0**：修复编辑区退格/大段删除卡顿（预览更新防抖：连续输入合并为一次渲染，不再逐字符全量渲染）
 - **v1.2.0**：Fluent 组件重写（v2-fluent）；移除换行/空格快捷键；修复链接跳转与图片嵌入；AI 命名异步化；对话框自适应
 - **v1.1.0**：PyQt5 单文件版（v1-pyqt）

@@ -90,6 +90,13 @@ class MainWindow(QMainWindow):
         self._ai_busy = False
         self._ai_callback = None
         self._ai_tip = None
+        # 预览更新防抖：连续输入（含按住退格/删除键的自动重复）合并为一次渲染。
+        # 原实现每个 textChanged 都同步做整篇 Markdown 渲染 + WebEngine JS 更新，
+        # 大段退格时每删除一个字符就阻塞一次 GUI 线程，导致编辑卡顿。
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.setInterval(150)
+        self._preview_timer.timeout.connect(self._flush_preview)
         # 启用拖放功能（编辑/预览组件自身不拦截）
         self.setAcceptDrops(True)
         self.init_ui()
@@ -317,6 +324,12 @@ class MainWindow(QMainWindow):
         self.cursor_position_label.setText(f"行: {line}, 列: {column}")
 
     def update_preview(self):
+        """调度预览更新（防抖：150ms 内的连续输入只渲染一次）。"""
+        if self.preview.isVisible():
+            self._preview_timer.start()
+
+    def _flush_preview(self):
+        """防抖定时器到点后真正渲染一次预览。"""
         if self.preview.isVisible():
             self.preview.update_preview(self.text_edit.toPlainText())
 
@@ -386,7 +399,8 @@ class MainWindow(QMainWindow):
         self.text_edit.setPlainText(content)
         self.current_file = file_path
         self.setWindowTitle(f'MDPad - {os.path.basename(file_path)}')
-        # 强制更新预览，无论其当前是否可见
+        # 强制更新预览，无论其当前是否可见；取消 setPlainText 触发的待定防抖渲染，避免重复
+        self._preview_timer.stop()
         self.preview.update_preview(content)
 
     def save_file(self):
