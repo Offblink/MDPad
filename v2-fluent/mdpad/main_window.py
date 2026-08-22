@@ -16,6 +16,7 @@ from qfluentwidgets import (
 
 from .preview import MarkdownPreview
 from .dialogs import HelpDialog, _font_scale, _apply_font_scale
+from .search import FindReplaceDialog
 from . import io, ai_naming, __app_name__, __org_name__
 
 
@@ -84,6 +85,8 @@ class MainWindow(QMainWindow):
         self.split_mode = True
         self.editing_mode = True
         self.settings = QSettings(__org_name__, __app_name__)
+        # 查找与替换窗口：懒加载，关闭即隐藏（保留状态）
+        self._find_dialog = None
         # AI 命名异步状态
         self._ai_worker = _AiWorker(self)
         self._ai_worker.done.connect(self._on_ai_done)
@@ -156,6 +159,12 @@ class MainWindow(QMainWindow):
         for btn in (self.bold_btn, self.italic_btn, self.header_btn, self.link_btn, self.code_btn):
             bar.addWidget(btn)
 
+        bar.addSpacing(12)
+
+        # 查找与替换
+        self.find_btn = self._tool_button(FluentIcon.SEARCH, "查找与替换 (Ctrl+F)", self.open_find)
+        bar.addWidget(self.find_btn)
+
         bar.addStretch(1)
 
         # 视图模式切换
@@ -185,6 +194,9 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("F3"), self, lambda: self.set_editing_mode(False))
         QShortcut(QKeySequence("F4"), self, self.toggle_split_view)
         QShortcut(QKeySequence("F1"), self, self.show_help)
+        QShortcut(QKeySequence("Ctrl+F"), self, self.open_find)
+        QShortcut(QKeySequence("Ctrl+G"), self, self.find_next)
+        QShortcut(QKeySequence("Ctrl+Shift+G"), self, self.find_previous)
 
     def _text_button(self, text, tip, slot):
         btn = ToolButton(self.toolbar_area)
@@ -234,6 +246,25 @@ class MainWindow(QMainWindow):
         """弹出帮助窗口（F1 / 帮助按钮）。"""
         dialog = HelpDialog(self)
         dialog.exec()
+
+    # ---------- 查找与替换 ----------
+
+    def _ensure_find_dialog(self):
+        if self._find_dialog is None:
+            self._find_dialog = FindReplaceDialog(self)
+        return self._find_dialog
+
+    def open_find(self):
+        """打开（或聚焦）查找与替换窗口（Ctrl+F / 工具栏按钮）。"""
+        self._ensure_find_dialog().show_find()
+
+    def find_next(self):
+        """查找下一个（Ctrl+G）。"""
+        self._ensure_find_dialog().find_next()
+
+    def find_previous(self):
+        """查找上一个（Ctrl+Shift+G）。"""
+        self._ensure_find_dialog().find_previous()
 
     # ---------- 设置持久化与命令行 ----------
 
