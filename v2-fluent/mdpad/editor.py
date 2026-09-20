@@ -4,15 +4,20 @@
 做法是 `setCursorWidth(0)` 关掉原生光标，在 `paintEvent` 里自己画一个，
 用 QTimer 逐帧插值；闪烁、尾迹、脉冲、强调色都由本控件自管。
 
-三个实测坑（改这里之前先读）：
+四个实测坑（改这里之前先读）：
   1. `cursorPositionChanged` 对同一次移动会发多次信号，必须按光标位置去重；
      否则后到的信号会把动画起点重置到终点，动画直接消失（看着像没生效）。
   2. `cursorWidth=0` 时 `cursorRect()` 返回**宽度为 0 的空矩形**，在 Python 里是假值。
-     任何 `a or b` 形式的挑选都会静默挑错，必须显式判 None；
-     同时意味着光标宽度只能自己定（不随 cursorRect）。
+     任何 `a or b` 形式的挑选都会静默挑错，必须显式判 None；光标宽度也只能自己定。
   3. Qt 只重绘脏区域，自绘光标必须自己记账：移动、闪烁、脉冲、滚动、缩放之后
      都要把「上一帧画过的矩形 ∪ 这一帧要画的矩形」交给 `viewport().update()`，
-     否则界面上会留下幽灵光标（尤其是滚动和改变窗口大小时）。
+     否则界面上会留下幽灵光标（尤其是滚动和改窗口大小时）。
+  4. **动画起点不能拿"上一次的光标位置"重新算**：退格 / 删除是"先改文档、再移动光标"，
+     那个旧位置在新文本里可能落到完全不同的地方（换行被删掉就是另一行），
+     甚至超出文档长度、算到布局之外——实测在文档末尾退格会得到 y=-1227 的矩形，
+     光标从 1900px 外飞进来。起点只能取"改文档之前屏幕上真正画着的那个矩形"
+     （`_visual` → `_from_rect`），终点则每次插值时按当前光标位置现算
+     （这样滚动 / 重排之后终点也自动是对的）。
 """
 from PyQt5.QtCore import QEasingCurve, QElapsedTimer, QRect, QTimer, QVariantAnimation
 from PyQt5.QtGui import QColor, QPainter, QTextCursor
@@ -47,9 +52,10 @@ class MarkdownEditor(QTextEdit):
         self.setCursorWidth(0)                   # 关掉原生光标（它只会瞬移）
 
         self._last_pos = None                    # 去重：上次处理过的光标位置
-        self._visual = None                      # 静止时屏幕上的光标矩形（视口坐标）
-        self._from_pos = None                    # 动画起点（字符位置）
-        self._to_pos = None                      # 动画终点（字符位置）
+        self._visual = None                      # 上一帧真正画在屏幕上的光标矩形
+        self._from_rect = None                   # 本次动画起点（改文档前屏幕上的矩形）
+        self._from_scroll = (0, 0)               # 记录起点时的滚动条值，用于滚动时跟随
+        self._to_pos = None                      # 本次动画终点（字符位置，逐帧现算矩形）
         self._pos = None                         # 动画中的插值矩形；None = 没有在滑行
         self._duration = MOVE_MIN_MS
         self._nav = False                        # 本次移动是否导航类（决定要不要落点脉冲）
@@ -90,19 +96,18 @@ class MarkdownEditor(QTextEdit):
         return QRect(rect.left(), rect.top(), CARET_W, rect.height())
 
     def _idle_rect(self):
-        """静止时应画的光标矩形。"""
+        """静止时光标该画的位置：每次现算，文档重排 / 滚动后也永远是对的。"""
         if not self.hasFocus():
             return None
-        return self._visual if self._visual is not None else self._rect_for(self.textCursor().position())
+        return self._rect_for(self.textCursor().position())
 
     def _region(self):
-        """这一帧占用的区域（尾迹 + 脉冲晕 + 光标），带外扩。"""
+        """这一帧要画的内容区域（光标 + 尾迹 + 脉冲晕），带外扩。"""
         region = QRect()
         now = self._now()
-        if self._visual is not None:
-            region = region.united(self._visual)
-        if self._pos is not None:
-            region = region.united(self._pos)
+        current = self._pos if self._pos is not None else self._idle_rect()
+        if current is not None:
+            region = region.united(current)
         for rect, stamp in self._trail:
             if now - stamp < TRAIL_MS:
                 region = region.united(rect)
@@ -119,16 +124,9 @@ class MarkdownEditor(QTextEdit):
             self.viewport().update(dirty)
 
     def _resync(self):
-        """滚动/缩放后重新对齐静止光标，并擦掉它原来的位置。"""
+        """滚动 / 缩放 / 文档重排之后重新对齐光标（现算新位置并擦掉旧位置）。"""
         if self._pos is not None:                # 滑行中：每帧都按当前位置重算，不用管
             return
-        new = self._rect_for(self.textCursor().position())
-        if self._visual is not None and new == self._visual:
-            return
-        old, self._visual = self._visual, new
-        if not self._caret_on and new is not None:
-            self._caret_on = True
-        self._painted = self._painted.united(old) if old is not None else self._painted
         self._schedule_paint()
 
     # ---------- 移动 / 动画 ----------
@@ -141,29 +139,32 @@ class MarkdownEditor(QTextEdit):
         previous = self._last_pos
         self._last_pos = position
 
-        target = self._rect_for(position)
         self._solid_until = self._now() + SOLID_MS
         self._accent_until = self._now() + ACCENT_MS
         self._caret_on = True
         self._blink_timer.start()                # 重新计时闪烁周期
 
+        # 起点取"改文档前屏幕上画着的矩形"；滑行中则从当前插值位置接着走。
+        # 注意：不能用 previous 位置现算——退格 / 删除之后那个位置已经不可信。
         start = self._pos if self._pos is not None else self._visual
+        target = self._rect_for(position)
         if self._composing or previous is None or start is None:
-            # 组词中 / 首次定位 / 无起点：直接落位，不做滑行
-            self._stop_animation()
-            self._visual = target
+            self._stop_animation()               # 组词中 / 首次定位 / 无起点：直接落位
             self._schedule_paint()
             return
         if (start.left(), start.top()) == (target.left(), target.top()):
-            self._visual = target
+            self._stop_animation()               # 屏幕上没变（例如仅重排）：不滑行
             self._schedule_paint()
             return
 
         self._nav = start.top() != target.top() or abs(position - previous) > 1
-        self._from_pos, self._to_pos = previous, position
+        self._from_rect = QRect(start)
+        self._from_scroll = (self.horizontalScrollBar().value(), self.verticalScrollBar().value())
+        self._to_pos = position
         distance = abs(target.left() - start.left()) + abs(target.top() - start.top())
         self._duration = int(min(MOVE_MAX_MS, MOVE_MIN_MS + distance * MOVE_MS_PER_PX))
-        if not self._scroll_into_view(target):
+        if self._scroll_into_view(target):
+            # 有滚动动画在跑：让滑行晚一点落地，光标跟着滚动一起到位
             self._duration = max(self._duration, SCROLL_MS + 40)
         self._elapsed = QElapsedTimer()
         self._elapsed.start()
@@ -172,10 +173,13 @@ class MarkdownEditor(QTextEdit):
         self._anim_timer.start()
 
     def _scroll_into_view(self, target):
-        """落点不在视口内时平滑滚动过去；已在视口内返回 True。"""
+        """落点不在视口内时平滑滚动过去。
+
+        返回：True = 已经起了一个滚动动画；False = 已在视口内，或滚不动（到达边界）。
+        """
         viewport = self.viewport().rect()
         if viewport.contains(target):
-            return True
+            return False
         bar = self.verticalScrollBar()
         margin = max(target.height(), 8)
         if target.top() < viewport.top():
@@ -200,20 +204,31 @@ class MarkdownEditor(QTextEdit):
             self._scroll_ani.stop()
             self._scroll_ani = None
         self._pos = None
-        self._from_pos = self._to_pos = None
+        self._from_rect = None
+        self._to_pos = None
         self._trail.clear()
         self._pulse_until = 0
 
+    def _start_rect(self):
+        """动画起点：捕获时屏幕上的矩形，按之后的滚动量平移（滚动中仍贴合原内容）。"""
+        dx = self.horizontalScrollBar().value() - self._from_scroll[0]
+        dy = self.verticalScrollBar().value() - self._from_scroll[1]
+        return self._from_rect.translated(-dx, -dy)
+
+    def _target_rect(self):
+        """动画终点：按当前光标位置现算（滚动 / 重排后自动跟随）。"""
+        return self._rect_for(self._to_pos)
+
     def _tick(self):
         now = self._now()
-        animating = self._from_pos is not None
+        animating = self._from_rect is not None
         if animating:
             total = min(1.0, self._elapsed.elapsed() / self._duration)
             self._pos = self._interpolate(total)
             if total >= 1.0:
-                self._visual = self._pos
                 self._pos = None
-                self._from_pos = self._to_pos = None
+                self._from_rect = None
+                self._to_pos = None
                 if self._nav:
                     self._pulse_until = now + PULSE_MS
             else:
@@ -230,8 +245,8 @@ class MarkdownEditor(QTextEdit):
         两段的时间按各自距离分摊（并各留 30% 上限/下限），否则同行移动会有一大段
         "原地不动"的死时间——实测第一版固定 60/40 时，同行动画前 60% 位移为 0。
         """
-        start = self._rect_for(self._from_pos)
-        end = self._rect_for(self._to_pos)
+        start = self._start_rect()
+        end = self._target_rect()
         dx = end.left() - start.left()
         dy = end.top() - start.top()
         if dy == 0:
@@ -263,12 +278,12 @@ class MarkdownEditor(QTextEdit):
         self._caret_on = True
         self._solid_until = self._now() + SOLID_MS
         self._blink_timer.start()
-        self._resync()
+        self._schedule_paint()
 
     def focusOutEvent(self, event):
         super().focusOutEvent(event)
         self._blink_timer.stop()
-        self._resync()                           # 失焦后要擦掉自绘光标
+        self._schedule_paint()                   # 失焦后要擦掉自绘光标
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -283,21 +298,20 @@ class MarkdownEditor(QTextEdit):
 
     def paintEvent(self, event):
         super().paintEvent(event)
-        if not self.hasFocus():
+        rect = self._pos if self._pos is not None else self._idle_rect()
+        self._visual = rect                      # 记下这一帧画在哪：下次动画的起点
+        if rect is None:
             return
         now = self._now()
         painter = QPainter(self.viewport())
 
-        for rect, stamp in self._trail:          # 尾迹：越旧越淡
+        for ghost, stamp in self._trail:         # 尾迹：越旧越淡
             age = now - stamp
             if age >= TRAIL_MS:
                 continue
             alpha = int(TRAIL_ALPHA * (1 - age / TRAIL_MS))
-            painter.fillRect(rect, QColor(*ACCENT, alpha))
+            painter.fillRect(ghost, QColor(*ACCENT, alpha))
 
-        rect = self._pos if self._pos is not None else self._visual
-        if rect is None:
-            return
         if self._pos is None and now < self._pulse_until:   # 落点脉冲：到位后极轻的一次加宽
             progress = 1 - (self._pulse_until - now) / PULSE_MS
             alpha = int(PULSE_ALPHA * (1 - progress))
