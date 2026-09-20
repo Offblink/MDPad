@@ -1,7 +1,7 @@
 """帮助与应用说明对话框。"""
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QLabel, QGroupBox,
+    QWidget, QVBoxLayout, QFormLayout, QLabel, QGroupBox,
     QScrollArea, QStackedWidget, QTextBrowser,
 )
 from qfluentwidgets import (
