@@ -19,6 +19,25 @@ import html
 import requests
 import json
 
+
+def load_ai_key():
+    """从 %APPDATA%\\MDPad\\ai_key.txt 读智谱 API key（与 v2-fluent 共用同一份，不进仓库）。
+
+    返回第一个非空且不以 # 开头的行；文件不存在或没填内容返回空串。
+    """
+    base = os.environ.get("APPDATA") or os.path.expanduser("~")
+    path = os.path.join(base, "MDPad", "ai_key.txt")
+    try:
+        with open(path, encoding="utf-8") as file:
+            for line in file:
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    return line
+    except OSError:
+        pass
+    return ""
+
+
 class AboutDialog(QDialog):
     """关于对话框"""
     def __init__(self, parent=None):
@@ -549,8 +568,8 @@ class MarkdownEditor(QMainWindow):
         self.current_file = None
         self.split_mode = True  # 默认分屏模式
         self.editing_mode = True
-        # 新增：设置AI API
-        self.API_KEY = "e7509fc557394a619bc89d9bc44172ce.qY4uSyCofHoCfQSX"  # 用户提供的API密钥
+        # 新增：设置AI API（key 不进仓库，从 %APPDATA%\MDPad\ai_key.txt 读）
+        self.API_KEY = load_ai_key()
         self.API_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions"  # 根据用户提供的URL基础补全
         self.init_ui()
         self.load_settings()
@@ -1069,7 +1088,12 @@ class MarkdownEditor(QMainWindow):
         """
         if not content or not content.strip():
             return None
-            
+
+        if not self.API_KEY:
+            self.status_bar.showMessage(
+                "未配置 AI key：请在 %APPDATA%\\MDPad\\ai_key.txt 里填一行智谱 API key", 4000)
+            return None
+
         # 准备API请求
         prompt = f"""
         请将以下文本内容总结成一个10个中文字以内的短标题，用于作为文件名。不要包含任何标点符号、引号或文件扩展名。\n
