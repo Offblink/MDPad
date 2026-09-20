@@ -29,7 +29,7 @@
   另外 Qt 只重绘脏区域，自绘光标必须自己记账：移动、闪烁、滚动、缩放之后都要把
   「上一帧画过的矩形 ∪ 这一帧要画的矩形」交给 `viewport().update()`，否则会留下幽灵光标。
 """
-from PyQt5.QtCore import QEasingCurve, QElapsedTimer, QRect, QTimer, QVariantAnimation
+from PyQt5.QtCore import QEasingCurve, QElapsedTimer, QRect, QRectF, Qt, QTimer, QVariantAnimation
 from PyQt5.QtGui import QColor, QPainter, QTextCursor
 from PyQt5.QtWidgets import QTextEdit
 
@@ -319,6 +319,18 @@ class MarkdownEditor(QTextEdit):
         self._composing = bool(event.preeditString())
         super().inputMethodEvent(event)
         self._composing = bool(event.preeditString())
+
+    def inputMethodQuery(self, query):
+        """把光标矩形查询补成有宽度的矩形——否则输入法的候选框会跑到窗口左上角。
+
+        `setCursorWidth(0)` 之后 Qt 自己的查询结果宽度是 0（实测
+        `ImCursorRectangle = QRectF(x, y, 0, h)`），Windows 拿这个矩形定位候选框时
+        会退化成"窗口左上角"。这里直接用当前光标位置给一个正常宽度的矩形。
+        """
+        if query in (Qt.ImCursorRectangle, Qt.ImMicroFocus):
+            rect = self.cursorRect(self.textCursor())
+            return QRectF(rect.left(), rect.top(), max(CARET_W, 1), rect.height())
+        return super().inputMethodQuery(query)
 
     # ---------- 绘制 ----------
 
