@@ -18,6 +18,13 @@
      光标从 1900px 外飞进来。起点只能取"改文档之前屏幕上真正画着的那个矩形"
      （`_visual` → `_from_rect`），终点则每次插值时按当前光标位置现算
      （这样滚动 / 重排之后终点也自动是对的）。
+  5. **编辑类移动和导航类移动必须分开处理**：打字 / 退格 / 删除时文字自己在动，
+     若还给光标做长距离滑行，就会出现三件事一起抖：光标落后真实位置几十像素、
+     删到折行处目标突然跳到上一行行尾（光标朝右扫过去）、每次按键都闪一次强调色
+     与脉冲。实测连打退格时画面上的光标会向右回退、相邻帧跳变 56px。
+     所以编辑类只做极短促的跟手滑行（≤1 字符），大跳（删换行、删选区、整段重排）
+     直接落位，并且不改色、不做脉冲；只有导航类（方向键、点击、查找跳转）
+     才用完整的滑行 + L 形路径 + 强调色 + 落点脉冲。
 """
 from PyQt5.QtCore import QEasingCurve, QElapsedTimer, QRect, QTimer, QVariantAnimation
 from PyQt5.QtGui import QColor, QPainter, QTextCursor
@@ -37,6 +44,9 @@ PULSE_PAD = 2               # 脉冲晕每侧宽度
 SOLID_MS = 500              # 移动后保持实心的时长，之后开始闪
 BLINK_MS = 530              # 闪烁周期
 ACCENT_MS = 300             # 运动结束后强调色保持时长
+EDIT_MS = 40                # 编辑类移动（打字 / 退格）的跟手滑行时长
+EDIT_SNAP_DX = 60           # 编辑类移动横向超过这个距离就干脆不滑（约 4 个字符）
+BURST_MS = 90               # 距上一次移动不超过这个间隔就算"连打"：编辑类直接落位
 PAD = PULSE_PAD + 2         # 局部重绘外扩，避免残留边
 
 
@@ -52,6 +62,8 @@ class MarkdownEditor(QTextEdit):
         self.setCursorWidth(0)                   # 关掉原生光标（它只会瞬移）
 
         self._last_pos = None                    # 去重：上次处理过的光标位置
+        self._last_len = self.document().characterCount()   # 用来区分"编辑"和"导航"
+        self._last_move_at = None                # 上次移动的时刻，用来识别"连打"
         self._visual = None                      # 上一帧真正画在屏幕上的光标矩形
         self._from_rect = None                   # 本次动画起点（改文档前屏幕上的矩形）
         self._from_scroll = (0, 0)               # 记录起点时的滚动条值，用于滚动时跟随
@@ -78,6 +90,13 @@ class MarkdownEditor(QTextEdit):
         self._blink_timer = QTimer(self)
         self._blink_timer.setInterval(BLINK_MS)
         self._blink_timer.timeout.connect(self._blink)
+
+        # 移动信号里不立刻算目标矩形（那时布局还没重排完），推迟一轮事件循环
+        self._pending = None
+        self._pending_timer = QTimer(self)
+        self._pending_timer.setSingleShot(True)
+        self._pending_timer.setInterval(0)
+        self._pending_timer.timeout.connect(self._apply_pending_move)
 
         self.cursorPositionChanged.connect(self._on_cursor_moved)
         self.verticalScrollBar().valueChanged.connect(self._resync)
@@ -139,30 +158,81 @@ class MarkdownEditor(QTextEdit):
         previous = self._last_pos
         self._last_pos = position
 
-        self._solid_until = self._now() + SOLID_MS
-        self._accent_until = self._now() + ACCENT_MS
+        length = self.document().characterCount()
+        edited = length != self._last_len        # 文档长度变了 => 打字 / 删除
+        self._last_len = length
+
         self._caret_on = True
+        self._solid_until = self._now() + SOLID_MS
         self._blink_timer.start()                # 重新计时闪烁周期
 
         # 起点取"改文档前屏幕上画着的矩形"；滑行中则从当前插值位置接着走。
         # 注意：不能用 previous 位置现算——退格 / 删除之后那个位置已经不可信。
         start = self._pos if self._pos is not None else self._visual
+        self._pending = (start, previous, position, edited)
+        # 终点矩形要等这一轮事件循环结束、布局重排完成之后再算：在
+        # cursorPositionChanged 里立刻 cursorRect() 拿到的还是"删了字但没重排"的
+        # 旧坐标，实测会让光标到位后又回弹几个像素（看着就是抖）
+        if not self._pending_timer.isActive():
+            self._pending_timer.start()
+
+    def _apply_pending_move(self):
+        """一轮事件循环之后处理这次移动：此时布局已经稳定，矩形是准的。"""
+        pending, self._pending = self._pending, None
+        if pending is None:
+            return
+        start, previous, position, edited = pending
+        if position != self.textCursor().position():
+            return                               # 期间又动过：等它的信号自己处理
+
         target = self._rect_for(position)
-        if self._composing or previous is None or start is None:
+        burst = self._last_move_at is not None and (self._now() - self._last_move_at) < BURST_MS
+        self._last_move_at = self._now()
+        if edited:
+            # 编辑类：文字自己在动（还会重排），光标只做短促的跟手滑行，并且
+            # 不改色、不做脉冲、不留尾迹——连打退格时这几样叠在一起就是"抖"。
+            # 连打（或大跳：删换行、删选区、整段重排）直接落位，最稳。
+            self._accent_until = 0
+            near = start is not None and not burst \
+                and abs(target.left() - start.left()) <= EDIT_SNAP_DX \
+                and target.top() == start.top()
+            if near and not self._composing:
+                self._nav = False
+                self._begin_animation(start, position, target, EDIT_MS)
+            else:
+                self._stop_animation()
+                self._visual = target        # 立刻对齐：下一次移动要以它为起点
+                self._schedule_paint()
+            return
+
+        # 导航类：方向键 / 点击 / 查找跳转 —— 完整滑行 + 强调色 + 落点脉冲
+        self._accent_until = self._now() + ACCENT_MS
+        if start is None and previous is not None:
+            # 还没画过光标（_visual 为空）时，用旧位置现算起点：导航类文本没变，
+            # 这个位置是可靠的（编辑类不能这么算，见 docstring 第 4 条）
+            start = self._rect_for(previous)
+        if start is None or self._composing or previous is None:
             self._stop_animation()               # 组词中 / 首次定位 / 无起点：直接落位
+            self._visual = target
             self._schedule_paint()
             return
         if (start.left(), start.top()) == (target.left(), target.top()):
             self._stop_animation()               # 屏幕上没变（例如仅重排）：不滑行
+            self._visual = target
             self._schedule_paint()
             return
 
         self._nav = start.top() != target.top() or abs(position - previous) > 1
+        distance = abs(target.left() - start.left()) + abs(target.top() - start.top())
+        duration = int(min(MOVE_MAX_MS, MOVE_MIN_MS + distance * MOVE_MS_PER_PX))
+        self._begin_animation(start, position, target, duration)
+
+    def _begin_animation(self, start, position, target, duration):
+        """启动一次滑行：起点是屏幕矩形，终点是字符位置（逐帧现算）。"""
         self._from_rect = QRect(start)
         self._from_scroll = (self.horizontalScrollBar().value(), self.verticalScrollBar().value())
         self._to_pos = position
-        distance = abs(target.left() - start.left()) + abs(target.top() - start.top())
-        self._duration = int(min(MOVE_MAX_MS, MOVE_MIN_MS + distance * MOVE_MS_PER_PX))
+        self._duration = max(1, duration)
         if self._scroll_into_view(target):
             # 有滚动动画在跑：让滑行晚一点落地，光标跟着滚动一起到位
             self._duration = max(self._duration, SCROLL_MS + 40)
@@ -226,13 +296,15 @@ class MarkdownEditor(QTextEdit):
             total = min(1.0, self._elapsed.elapsed() / self._duration)
             self._pos = self._interpolate(total)
             if total >= 1.0:
+                self._visual = self._target_rect()   # 落位后立刻对齐：下一次移动从这里起步
                 self._pos = None
                 self._from_rect = None
                 self._to_pos = None
                 if self._nav:
                     self._pulse_until = now + PULSE_MS
             else:
-                self._trail.append((self._pos, now))
+                if self._nav:                    # 尾迹只给导航类，编辑时留痕会显得闪
+                    self._trail.append((self._pos, now))
                 self._caret_on = True
         self._trail = [(rect, stamp) for rect, stamp in self._trail if now - stamp < TRAIL_MS]
         if not animating and not self._trail and now >= self._pulse_until:
