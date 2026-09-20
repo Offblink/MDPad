@@ -87,6 +87,14 @@ class MainWindow(QMainWindow):
         self.settings = QSettings(__org_name__, __app_name__)
         # 查找与替换窗口：懒加载，关闭即隐藏（保留状态）
         self._find_dialog = None
+        # 帮助窗口：已打开时不再新建（F1 / 帮助按钮 幂等）
+        self._help_dialog = None
+        # 上次分屏的两栏尺寸（离开分屏前记录，见 _remember_split_sizes）
+        self._split_sizes = None
+        # 已打开的文件的锁（打开期间禁止外部移动/删除/重命名）
+        self._file_guard = io.FileGuard()
+        # 主窗口快捷键（遮罩对话框期间统一禁用，见 _run_modal）
+        self._shortcuts = []
         # AI 命名异步状态
         self._ai_worker = _AiWorker(self)
         self._ai_worker.done.connect(self._on_ai_done)
@@ -181,22 +189,25 @@ class MainWindow(QMainWindow):
         self.help_btn = self._tool_button(FluentIcon.HELP, "帮助 (F1)", self.show_help)
         bar.addWidget(self.help_btn)
 
-        # 快捷键
-        QShortcut(QKeySequence("Ctrl+N"), self, self.new_file)
-        QShortcut(QKeySequence("Ctrl+O"), self, self.open_file)
-        QShortcut(QKeySequence("Ctrl+S"), self, self.save_file)
-        QShortcut(QKeySequence("Ctrl+Shift+S"), self, self.save_file_as)
-        QShortcut(QKeySequence("Ctrl+B"), self, lambda: self.insert_formatting("**", "**"))
-        QShortcut(QKeySequence("Ctrl+I"), self, lambda: self.insert_formatting("*", "*"))
-        QShortcut(QKeySequence("Ctrl+K"), self, self.insert_code_block)
-        QShortcut(QKeySequence("Ctrl+L"), self, self.insert_link)
-        QShortcut(QKeySequence("F2"), self, lambda: self.set_editing_mode(True))
-        QShortcut(QKeySequence("F3"), self, lambda: self.set_editing_mode(False))
-        QShortcut(QKeySequence("F4"), self, self.toggle_split_view)
-        QShortcut(QKeySequence("F1"), self, self.show_help)
-        QShortcut(QKeySequence("Ctrl+F"), self, self.open_find)
-        QShortcut(QKeySequence("Ctrl+G"), self, self.find_next)
-        QShortcut(QKeySequence("Ctrl+Shift+G"), self, self.find_previous)
+        # 快捷键（遮罩对话框打开期间会被 _run_modal 统一禁用）
+        for sequence, slot in (
+            ("Ctrl+N", self.new_file),
+            ("Ctrl+O", self.open_file),
+            ("Ctrl+S", self.save_file),
+            ("Ctrl+Shift+S", self.save_file_as),
+            ("Ctrl+B", lambda: self.insert_formatting("**", "**")),
+            ("Ctrl+I", lambda: self.insert_formatting("*", "*")),
+            ("Ctrl+K", self.insert_code_block),
+            ("Ctrl+L", self.insert_link),
+            ("F2", lambda: self.set_editing_mode(True)),
+            ("F3", lambda: self.set_editing_mode(False)),
+            ("F4", self.toggle_split_view),
+            ("F1", self.show_help),
+            ("Ctrl+F", self.open_find),
+            ("Ctrl+G", self.find_next),
+            ("Ctrl+Shift+G", self.find_previous),
+        ):
+            self._shortcuts.append(QShortcut(QKeySequence(sequence), self, slot))
 
     def _text_button(self, text, tip, slot):
         btn = ToolButton(self.toolbar_area)
@@ -242,10 +253,37 @@ class MainWindow(QMainWindow):
         """跟随系统明暗主题。"""
         setTheme(Theme.AUTO)
 
+    def _run_modal(self, dialog):
+        """以模态方式运行一个遮罩对话框，期间禁用主窗口快捷键。
+
+        HelpDialog / SaveChangesDialog / MessageBox 都继承 MaskDialogBase：无边框、
+        半透明、铺满父窗，但显示时**不会成为活动窗口**（实测 activeWindow 仍是主窗口）。
+        于是主窗口的 QShortcut 会漏进模态流程：F1 叠出多个帮助框，Ctrl+O/Ctrl+N
+        叠出多个保存确认框。遮罩本身挡住了鼠标，这里把键盘这条路也堵上。
+        """
+        for shortcut in self._shortcuts:
+            shortcut.setEnabled(False)
+        try:
+            dialog.exec()
+        finally:
+            for shortcut in self._shortcuts:
+                shortcut.setEnabled(True)
+
     def show_help(self):
-        """弹出帮助窗口（F1 / 帮助按钮）。"""
+        """弹出帮助窗口（F1 / 帮助按钮）。
+
+        幂等：已打开时只把现有窗口提到前面，不再新建。
+        """
+        if self._help_dialog is not None:
+            self._help_dialog.raise_()
+            self._help_dialog.activateWindow()
+            return
         dialog = HelpDialog(self)
-        dialog.exec()
+        self._help_dialog = dialog
+        try:
+            self._run_modal(dialog)
+        finally:
+            self._help_dialog = None
 
     # ---------- 查找与替换 ----------
 
@@ -272,13 +310,26 @@ class MainWindow(QMainWindow):
         geometry = self.settings.value("geometry")
         if geometry:
             self.restoreGeometry(geometry)
-        split_sizes = self.settings.value("split_sizes")
-        if split_sizes:
-            self.editor_splitter.setSizes([int(size) for size in split_sizes])
+        # 分栏尺寸只在两栏都有效时采用：旧版本在单栏模式下退出会把 [宽, 0] 写进设置，
+        # 那样的值会让分屏变成"一栏占满、另一栏宽度 0"，看着像继承了上次的单栏模式
+        sizes = self._two_pane_sizes(self.settings.value("split_sizes"))
+        if sizes:
+            self._split_sizes = sizes
+            self.editor_splitter.setSizes(sizes)
+        mode = self.settings.value("view_mode")
+        if mode == "edit":
+            self.set_editing_mode(True)
+        elif mode == "preview":
+            self.set_editing_mode(False)
+        else:
+            self.set_split_mode(True)
 
     def save_settings(self):
         self.settings.setValue("geometry", self.saveGeometry())
-        self.settings.setValue("split_sizes", self.editor_splitter.sizes())
+        self._remember_split_sizes()
+        if self._split_sizes:
+            self.settings.setValue("split_sizes", self._split_sizes)
+        self.settings.setValue("view_mode", self._mode_key())
 
     def open_path(self, file_path):
         """打开命令行/文件关联传入的路径（含非 Markdown 扩展名确认）。"""
@@ -293,7 +344,7 @@ class MainWindow(QMainWindow):
             proceed = []
             box.yesSignal.connect(lambda: proceed.append(True))
             box.cancelSignal.connect(lambda: proceed.append(False))
-            box.exec()
+            self._run_modal(box)
             if not proceed or not proceed[0]:
                 return
         self.load_file(file_path)
@@ -301,6 +352,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         if self.check_save_changes():
             self.save_settings()
+            self._file_guard.release()
             event.accept()
         else:
             event.ignore()
@@ -315,17 +367,60 @@ class MainWindow(QMainWindow):
 
     # ---------- 视图模式 ----------
 
+    def _mode_key(self):
+        """当前视图模式（持久化用）：edit / preview / split。"""
+        if self.split_mode:
+            return "split"
+        return "edit" if self.editing_mode else "preview"
+
+    @staticmethod
+    def _two_pane_sizes(raw):
+        """把分栏尺寸解析成合法的两栏尺寸；缺失或不合法返回 None。"""
+        if not raw:
+            return None
+        try:
+            sizes = [int(size) for size in raw]
+        except (TypeError, ValueError):
+            return None
+        if len(sizes) != 2 or min(sizes) <= 0:
+            return None
+        return sizes
+
+    def _remember_split_sizes(self):
+        """两栏都可见且都有宽度时记下当前栏宽（离开分屏前调用）。
+
+        QSplitter 隐藏一侧后 sizes() 会给出 [宽, 0]，直接存下来就会把"上次是
+        单栏模式"编码进设置；这里只在两栏都有效时才更新。
+        """
+        sizes = self._two_pane_sizes(self.editor_splitter.sizes())
+        if sizes:
+            self._split_sizes = sizes
+
+    def _split_target_sizes(self):
+        """分屏时两栏的目标尺寸：沿用上次的栏宽比例，没有则等分。"""
+        total = self.editor_splitter.width() - self.editor_splitter.handleWidth()
+        if total <= 0:
+            return None
+        if self._split_sizes:
+            first = int(total * self._split_sizes[0] / sum(self._split_sizes))
+            return [first, total - first]
+        half = total // 2
+        return [half, total - half]
+
     def set_split_mode(self, enabled):
+        self._remember_split_sizes()
         self.split_mode = enabled
         self.mode_seg.setCurrentItem("split" if enabled else ("edit" if self.editing_mode else "preview"))
         self.update_view_mode()
 
     def toggle_split_view(self):
+        self._remember_split_sizes()
         self.split_mode = not self.split_mode
         self.mode_seg.setCurrentItem("split" if self.split_mode else ("edit" if self.editing_mode else "preview"))
         self.update_view_mode()
 
     def set_editing_mode(self, editing):
+        self._remember_split_sizes()
         self.editing_mode = editing
         self.split_mode = False
         self.mode_seg.setCurrentItem("edit" if editing else "preview")
@@ -335,10 +430,9 @@ class MainWindow(QMainWindow):
         if self.split_mode:
             self.text_edit.show()
             self.preview.show()
-            total = self.text_edit.width() + self.preview.width()
-            if total > 0:
-                half = total // 2
-                self.editor_splitter.setSizes([half, half])
+            sizes = self._split_target_sizes()
+            if sizes:
+                self.editor_splitter.setSizes(sizes)
         else:
             if self.editing_mode:
                 self.text_edit.show()
@@ -404,10 +498,16 @@ class MainWindow(QMainWindow):
 
     # ---------- 文件操作 ----------
 
+    def _lock_current_file(self):
+        """锁住当前文件，使外部无法移动/删除/重命名它（已锁则不动）。"""
+        if self.current_file and self._file_guard.path != self.current_file:
+            self._file_guard.acquire(self.current_file)
+
     def new_file(self):
         if self.check_save_changes():
             self.text_edit.clear()
             self.current_file = None
+            self._file_guard.release()
             self.setWindowTitle('MDPad - Markdown 编辑器')
             self.notify("info", "已新建文件", "", duration=2000)
 
@@ -429,6 +529,7 @@ class MainWindow(QMainWindow):
             return
         self.text_edit.setPlainText(content)
         self.current_file = file_path
+        self._lock_current_file()
         self.setWindowTitle(f'MDPad - {os.path.basename(file_path)}')
         # 强制更新预览，无论其当前是否可见；取消 setPlainText 触发的待定防抖渲染，避免重复
         self._preview_timer.stop()
@@ -464,6 +565,7 @@ class MainWindow(QMainWindow):
         try:
             io.write_text_file(file_path, self.text_edit.toPlainText())
             self.current_file = file_path
+            self._lock_current_file()
             self.setWindowTitle(f'MDPad - {os.path.basename(file_path)}')
             self.text_edit.document().setModified(False)
             self.notify("success", "已保存", file_path)
@@ -499,7 +601,7 @@ class MainWindow(QMainWindow):
         if not self.text_edit.document().isModified():
             return True
         dialog = SaveChangesDialog(self)
-        dialog.exec()
+        self._run_modal(dialog)
         if dialog.choice == "save":
             self.save_file()
             return True
@@ -574,7 +676,7 @@ class MainWindow(QMainWindow):
             proceed = []
             box.yesSignal.connect(lambda: proceed.append(True))
             box.cancelSignal.connect(lambda: proceed.append(False))
-            box.exec()
+            self._run_modal(box)
             if not proceed or not proceed[0]:
                 event.acceptProposedAction()
                 return

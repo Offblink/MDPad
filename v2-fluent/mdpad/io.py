@@ -1,4 +1,6 @@
-"""文件读写与 HTML 导出。"""
+"""文件读写、文件锁与 HTML 导出。"""
+import os
+
 import markdown
 
 # 读取时尝试的编码顺序
@@ -93,6 +95,71 @@ def write_text_file(file_path, text):
     """以 UTF-8 写入文本文件。"""
     with open(file_path, 'w', encoding='utf-8') as file:
         file.write(text)
+
+
+class FileGuard:
+    """打开期间锁住文件，让外部程序无法移动/删除/重命名它。
+
+    原理：Windows 上只要有一份句柄没有授予 `FILE_SHARE_DELETE`，
+    `MoveFile`/`DeleteFile`（也就是资源管理器的移动、改名、删除）就会
+    以 ERROR_SHARING_VIOLATION 失败。这里刻意只授予 SHARE_READ|SHARE_WRITE：
+
+      - 不给 SHARE_DELETE -> 移动/改名/删除被挡住
+      - 给 SHARE_WRITE     -> 自己的「保存」（另开句柄写入）不受影响
+      - 给 SHARE_READ      -> 别人仍可只读打开，不被误伤
+
+    只读属性 / 独占程序（比如被 Word 独占的文件）导致拿不到句柄时，
+    本类静默降级为"不加锁"，不打断打开文件的主流程。
+    非 Windows 平台是空操作。
+    """
+
+    GENERIC_READ = 0x80000000
+    SHARE_READ_WRITE = 0x00000001 | 0x00000002
+    OPEN_EXISTING = 3
+    FILE_ATTRIBUTE_NORMAL = 0x80
+    INVALID_HANDLE = -1
+
+    def __init__(self):
+        self._handle = None
+        self._path = None
+        self._create_file = None
+        self._close_handle = None
+        if os.name == 'nt':
+            import ctypes
+            from ctypes import wintypes
+
+            kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+            kernel32.CreateFileW.restype = wintypes.HANDLE
+            kernel32.CreateFileW.argtypes = [
+                wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+                wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+            ]
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            self._create_file = kernel32.CreateFileW
+            self._close_handle = kernel32.CloseHandle
+
+    def acquire(self, file_path):
+        """锁住 file_path；先前锁住的文件自动释放。拿不到句柄就只记录路径。"""
+        self.release()
+        self._path = file_path
+        if self._create_file is None:
+            return
+        handle = self._create_file(
+            file_path, self.GENERIC_READ, self.SHARE_READ_WRITE,
+            None, self.OPEN_EXISTING, self.FILE_ATTRIBUTE_NORMAL, None,
+        )
+        self._handle = None if handle == self.INVALID_HANDLE else handle
+
+    def release(self):
+        """释放锁（取消对文件的独占，之后可正常移动/删除/改名）。"""
+        if self._handle is not None and self._close_handle is not None:
+            self._close_handle(self._handle)
+        self._handle = None
+        self._path = None
+
+    @property
+    def path(self):
+        return self._path
 
 
 def render_export_html(markdown_text):
