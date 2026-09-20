@@ -33,6 +33,25 @@ from PyQt5.QtCore import QEasingCurve, QElapsedTimer, QRect, QRectF, Qt, QTimer,
 from PyQt5.QtGui import QColor, QPainter, QTextCursor
 from PyQt5.QtWidgets import QTextEdit
 
+import os
+
+if os.name == 'nt':
+    import ctypes
+    from ctypes import wintypes
+
+    class _GUITHREADINFO(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.DWORD), ("flags", wintypes.DWORD),
+                    ("hwndActive", wintypes.HWND), ("hwndFocus", wintypes.HWND),
+                    ("hwndCapture", wintypes.HWND), ("hwndMenuOwner", wintypes.HWND),
+                    ("hwndMoveSize", wintypes.HWND), ("hwndCaret", wintypes.HWND),
+                    ("rcCaret", wintypes.RECT)]
+
+    _user32 = ctypes.windll.user32
+    _gdi32 = ctypes.windll.gdi32
+    _kernel32 = ctypes.windll.kernel32
+else:                                            # 非 Windows：不维护系统光标
+    _user32 = None
+
 ACCENT = (0, 120, 212)      # Fluent 强调色（运动期间的光标色）
 CARET_W = 2                 # 自绘光标宽度（原生 1px，这里 2px 更显动画）
 MOVE_MIN_MS = 70            # 滑行时长下限
@@ -72,6 +91,8 @@ class MarkdownEditor(QTextEdit):
         self._text_changed = False
         self._last_move_at = None                # 上次移动的时刻，用来识别"连打"
         self._painted = QRect()                  # 上一帧占用区域（用于擦除）
+        self._caret_bitmap = None                # 隐形系统光标的位图（Windows）
+        self._caret_bits = None
         self._scroll_ani = None
 
         self._clock = QElapsedTimer()
@@ -299,16 +320,64 @@ class MarkdownEditor(QTextEdit):
         self._caret_on = not self._caret_on
         self._schedule_paint()
 
+    def _system_caret_window(self):
+        """当前线程的"系统光标"属于哪个窗口（None = 系统里没有光标）。"""
+        if _user32 is None:
+            return None
+        info = _GUITHREADINFO()
+        info.cbSize = ctypes.sizeof(_GUITHREADINFO)
+        if not _user32.GetGUIThreadInfo(_kernel32.GetCurrentThreadId(), ctypes.byref(info)):
+            return None
+        return info.hwndCaret
+
+    def _ensure_system_caret(self):
+        """让 Windows 也知道光标在哪
+
+        自绘光标用 `setCursorWidth(0)` 关掉原生光标之后，Qt 就不再创建系统光标了
+        （实测 `hwndCaret = None`、`rcCaret = (0,0,0,0)`）。可输入法（以及"文本光标
+        指示器"这类辅助功能）恰恰是问系统要这个位置的：拿到空值就把候选框贴到窗口
+        左上角，光标在行首这种边界还会偏到上一行——只补 Qt 的 `inputMethodQuery` 不够，
+        因为那条路不是所有输入法都走。
+
+        这里自己建一个"有尺寸、但位图全 0（= 不可见）"的系统光标，并一直把它摆到
+        真实光标位置：Windows 由位图 XOR 出光标，全 0 位图等于不改变屏幕，所以
+        既不会多出一个光标，`rcCaret` 又是准的。
+        """
+        if _user32 is None or not self.hasFocus():
+            return
+        hwnd = int(self.viewport().winId())
+        if not hwnd:
+            return
+        if not self._system_caret_window():
+            height = max(self.fontMetrics().height(), 8)
+            row_bytes = ((CARET_W + 15) // 16) * 2       # 1bpp 位图按 16 位对齐
+            self._caret_bits = ctypes.create_string_buffer(row_bytes * height)   # 全 0
+            self._caret_bitmap = _gdi32.CreateBitmap(CARET_W, height, 1, 1, self._caret_bits)
+            if not self._caret_bitmap:
+                return
+            _user32.DestroyCaret()
+            if not _user32.CreateCaret(hwnd, self._caret_bitmap, 0, 0):
+                return
+            _user32.ShowCaret(hwnd)
+        rect = self._rect_for(self.textCursor().position())
+        _user32.SetCaretPos(rect.left(), rect.top())
+
+    def _destroy_system_caret(self):
+        if _user32 is not None and self._system_caret_window():
+            _user32.DestroyCaret()
+
     def focusInEvent(self, event):
         super().focusInEvent(event)
         self._caret_on = True
         self._solid_until = self._now() + SOLID_MS
         self._blink_timer.start()
+        self._ensure_system_caret()
         self._schedule_paint()
 
     def focusOutEvent(self, event):
         super().focusOutEvent(event)
         self._blink_timer.stop()
+        self._destroy_system_caret()             # 失焦后系统里也不该留光标
         self._schedule_paint()                   # 失焦后要擦掉自绘光标
 
     def resizeEvent(self, event):
@@ -336,6 +405,7 @@ class MarkdownEditor(QTextEdit):
 
     def paintEvent(self, event):
         super().paintEvent(event)
+        self._ensure_system_caret()               # 每次重绘都把系统光标摆正（输入法靠它定位）
         rect = self._pos if self._pos is not None else self._idle_rect()
         self._visual = rect                      # 记下这一帧画在哪：下次动画的起点
         if rect is None:
