@@ -5,7 +5,7 @@ import threading
 from PyQt5.QtCore import Qt, QSettings, QObject, pyqtSignal, QTimer
 from PyQt5.QtGui import QFont, QIcon, QTextCursor, QDragEnterEvent, QDropEvent, QKeySequence
 from PyQt5.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QTextEdit, QSplitter,
     QStatusBar, QFileDialog, QShortcut,
 )
 from qfluentwidgets import (
@@ -15,7 +15,6 @@ from qfluentwidgets import (
 )
 
 from .preview import MarkdownPreview
-from .editor import MarkdownEditor
 from .dialogs import HelpDialog, _font_scale, _apply_font_scale
 from .search import FindReplaceDialog
 from . import io, ai_naming, __app_name__, __org_name__
@@ -229,7 +228,7 @@ class MainWindow(QMainWindow):
     def build_editor_area(self):
         self.editor_splitter = QSplitter(Qt.Horizontal)
 
-        self.text_edit = MarkdownEditor()
+        self.text_edit = QTextEdit()
         self.text_edit.setFont(QFont("Consolas", 11))
         self.text_edit.textChanged.connect(self.update_preview)
         self.text_edit.cursorPositionChanged.connect(self.update_cursor_position)
