@@ -2,7 +2,7 @@
 
 Fluent 风格的 Markdown 编辑器，基于 PyQt5 + PyQt-Fluent-Widgets + Python-Markdown。
 
-支持实时预览、分屏编辑、图片嵌入、链接跳转（文件/网址分流）、AI 智能文件名生成。
+支持实时预览、分屏编辑、图片嵌入、链接跳转（文件/网址分流）、AI 智能文件名生成。另有终端版 **v3-tui**（基于 Textual，纯键盘操作）。
 
 ## 目录结构
 
@@ -28,6 +28,15 @@ MDPad/
 │       ├── ai_naming.py   AI 文件名生成
 │       ├── dialogs.py     帮助窗口（快捷键/应用说明）
 │       └── search.py      查找与替换（非模态卡片窗口）
+├── v3-tui/        终端版（Textual TUI）
+│   ├── mdtui.py           入口
+│   ├── requirements.txt
+│   └── mdpad_tui/
+│       ├── app.py         应用主体（三视图/状态栏/文件生命周期）
+│       ├── editor.py      编辑区（TextArea 封装）
+│       ├── preview.py     预览（Markdown + 链接/图片分发）
+│       ├── findbar.py     查找替换底条
+│       └── dialogs.py     帮助 / 路径输入 / 退出确认
 └── README.md
 ```
 
@@ -40,6 +49,12 @@ python v2-fluent/MDPad.pyw 文档.md    # 启动并打开文件
 ```
 
 双击 `v2-fluent/MDPad.pyw` 也可直接运行。
+
+```bash
+# 终端版（TUI）
+pip install -r v3-tui/requirements.txt
+python v3-tui/mdtui.py 文档.md         # 启动并打开文件
+```
 
 > 依赖注意：`qfluentwidgets` 对应 PyQt5 版的 PyPI 包名是 `PyQt-Fluent-Widgets`（requirements.txt 已锁定）。
 > 若再安装 `PyQt6-Fluent-Widgets`，两者共用 `qfluentwidgets` 包名会互相覆盖，启动时报错
@@ -57,6 +72,7 @@ python v2-fluent/MDPad.pyw 文档.md    # 启动并打开文件
 - 导出 HTML
 - 查找与替换：Ctrl+F 弹出卡片窗口（与帮助/保存确认同风格）；查找下一个/上一个（自动循环）、区分大小写、匹配计数；替换当前 / 全部替换
 - 跟随系统明暗主题；对话框尺寸与字体随主窗口缩放
+- **终端版（v3-tui）**：Textual 实现，编辑/预览/分屏三视图（模式持久化）、实时预览防抖、查找替换（F6 区分大小写）、文件锁与多编码打开复用 v2 纯逻辑模块、状态栏（文件名/脏标记/行列）、退出未保存确认；应用内 F1 查看快捷键
 
 ## 快捷键
 
