@@ -15,8 +15,10 @@ HELP_TEXT = """\
   [cyan]视图[/cyan]   F2 编辑 · F3 预览 · F4 分屏
   [cyan]文件[/cyan]   Ctrl+S 保存 · Ctrl+Shift+S 另存为 · Ctrl+O 打开
   [cyan]编辑[/cyan]   Ctrl+Z / Ctrl+Y 撤销 / 重做
-  [cyan]查找[/cyan]   Ctrl+F 查找替换 · Ctrl+G 下一个 · Ctrl+Shift+G 上一个
-            F6 区分大小写 · Esc 收起查找条
+  [cyan]格式[/cyan]   Ctrl+B 加粗 · Alt+I 斜体 · Ctrl+K 代码块
+          Ctrl+L 链接 · Ctrl+Shift+L 内嵌图片
+  [cyan]查找[/cyan]   Ctrl+F 查找替换(弹窗) · Ctrl+G 下一个 · Ctrl+Shift+G 上一个
+          F6 区分大小写 · Esc 关闭弹窗
   [cyan]其他[/cyan]   F1 本帮助 · Ctrl+Q 退出
 
 预览中的链接与图片点击即用系统默认程序打开。

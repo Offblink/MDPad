@@ -10,6 +10,8 @@ from __future__ import annotations
 from textual.widgets import TextArea
 from textual.widgets._text_area import LanguageDoesNotExist
 
+from . import formatting
+
 
 def _markdown_language_or_none() -> str | None:
     """探测 markdown 语法包是否可用；不可用返回 None 而非报错。"""
@@ -32,10 +34,15 @@ class Editor(TextArea):
         )
 
     def on_key(self, event) -> None:
-        """TextArea 默认把 ctrl+f 绑成 delete_word_right (_text_area.py:266)，
-        会吞掉全局查找键并误删文本 — 拦截转交应用；其余键不处理，
-        基类走独立的 _on_key 通道不受影响。"""
+        """TextArea 默认占用的两个键在此拦截:
+        ctrl+f = delete_word_right (_text_area.py:266) 会误删文本 → 转交查找;
+        ctrl+k = 删到行尾 (TextArea 键位表) → 转交代码块。
+        其余键不处理, 基类走独立 _on_key 通道不受影响。"""
         if event.key == "ctrl+f":
             event.prevent_default()
             event.stop()
             self.app.action_find()
+        elif event.key == "ctrl+k":
+            event.prevent_default()
+            event.stop()
+            formatting.insert_code_block(self)

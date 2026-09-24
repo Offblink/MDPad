@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -17,14 +18,16 @@ from pathlib import Path
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal
-from textual.widgets import Footer, Header, Input, Static
+from textual.widgets import Footer, Header, Static
 
 from mdpad.io import FileGuard, read_text_file, write_text_file
 
+from . import formatting
 from .dialogs import HelpScreen, PathPrompt, QuitConfirm
 from .editor import Editor
-from .findbar import FindBar
+from .find_replace import FindState, FindScreen, find_next as _find_next
 from .preview import Preview
+from .sysdialog import system_open_file_dialog, system_save_file_dialog
 
 MODES = ("edit", "preview", "split")
 PREVIEW_DEBOUNCE = 0.2  # 秒; 与 GUI 版 v1.3.0 同思路: 连续输入合并渲染
@@ -45,9 +48,6 @@ class MDPadApp(App):
     #body { height: 1fr; }
     #body > Editor, #body > Preview { width: 100%; }
     #body.m-split > Editor, #body.m-split > Preview { width: 50%; }
-    FindBar { display: none; height: 1; background: $panel; }
-    FindBar > Input { width: 1fr; border: none; background: $panel; }
-    FindBar > Static { width: auto; padding: 0 1; color: $text-muted; }
     #status { height: 1; background: $panel; color: $text-muted; padding: 0 1; }
     HelpScreen, PathPrompt, QuitConfirm { align: center middle; }
     #help-box, #prompt-box, #quit-box {
@@ -68,6 +68,12 @@ class MDPadApp(App):
         Binding("ctrl+f", "find", "查找", show=False),
         Binding("ctrl+g", "find_next", "下一个", show=False),
         Binding("ctrl+shift+g", "find_prev", "上一个", show=False),
+        Binding("ctrl+b", "format_bold", "加粗", show=False),
+        Binding("ctrl+i", "format_italic", "斜体", show=False),
+        Binding("alt+i", "format_italic", "斜体", show=False),
+        Binding("ctrl+k", "format_code", "代码块", show=False),
+        Binding("ctrl+l", "format_link", "链接", show=False),
+        Binding("ctrl+shift+l", "format_image", "图片", show=False),
         Binding("f1", "show_help", "帮助"),
         Binding("f2", "mode_edit", "编辑"),
         Binding("f3", "mode_preview", "预览"),
@@ -83,6 +89,7 @@ class MDPadApp(App):
         self._saved_text = ""
         self._mode = "edit"
         self._preview_gen = 0  # 防抖代数计数
+        self.find_state = FindState()  # 查找状态跨弹窗存续
 
     # ── 组装 ────────────────────────────────────────────────
     def compose(self) -> ComposeResult:
@@ -90,7 +97,6 @@ class MDPadApp(App):
         with Horizontal(id="body"):
             yield Editor(id="editor")
             yield Preview(id="preview")
-        yield FindBar(id="findbar")
         yield Static("", id="status")
         yield Footer()
 
@@ -198,9 +204,19 @@ class MDPadApp(App):
         self.refresh_status()
         self.notify(f"已打开 {path.name}")
 
-    def action_open(self) -> None:
-        initial = str(self.file_path.parent if self.file_path else Path.cwd())
-        self.push_screen(PathPrompt("打开文件", initial), self._on_open_path)
+    async def action_open(self) -> None:
+        ok, value = await system_open_file_dialog()
+        if not ok:
+            initial = str(
+                self.file_path.parent if self.file_path else Path.cwd()
+            )
+            self.notify("系统对话框不可用, 改用内置输入", severity="warning")
+            self.push_screen(
+                PathPrompt("打开文件", initial), self._on_open_path
+            )
+        elif value:
+            self._on_open_path(value)
+        # ok 且空 = 用户取消
 
     def _on_open_path(self, value: str | None) -> None:
         if not value:
@@ -213,9 +229,9 @@ class MDPadApp(App):
         else:
             self.notify(f"文件不存在: {path}", severity="warning")
 
-    def action_save(self) -> None:
+    async def action_save(self) -> None:
         if self.file_path is None:
-            self.action_save_as()
+            await self.action_save_as()
             return
         text = self.query_one(Editor).text
         write_text_file(self.file_path, text)
@@ -223,9 +239,17 @@ class MDPadApp(App):
         self.refresh_status()
         self.notify(f"已保存 {self.file_path.name}")
 
-    def action_save_as(self) -> None:
-        initial = self.file_path.name if self.file_path else "未命名.md"
-        self.push_screen(PathPrompt("另存为", initial), self._on_save_as_path)
+    async def action_save_as(self) -> None:
+        default = self.file_path.name if self.file_path else "未命名.md"
+        ok, value = await system_save_file_dialog(default)
+        if not ok:
+            self.notify("系统对话框不可用, 改用内置输入", severity="warning")
+            self.push_screen(
+                PathPrompt("另存为", default), self._on_save_as_path
+            )
+        elif value:
+            self._on_save_as_path(value)
+        # ok 且空 = 用户取消
 
     def _on_save_as_path(self, value: str | None) -> None:
         if not value:
@@ -238,25 +262,38 @@ class MDPadApp(App):
         self.file_guard.acquire(str(path))
         self.action_save()
 
-    # ── 查找替换 ────────────────────────────────────────────
+    # ── 查找替换 (居中弹窗; 状态存 app.find_state) ──────────
     def action_find(self) -> None:
-        bar = self.query_one(FindBar)
-        bar.display = True
-        editor = self.query_one(Editor)
-        selection = editor.selected_text
-        find_input = bar.query_one("#find-input", Input)
-        if selection and "\n" not in selection:
-            find_input.value = selection
-        find_input.focus()
-        bar.refresh_count(editor)
+        self.push_screen(
+            FindScreen(), lambda _: self.query_one(Editor).focus()
+        )
 
     def action_find_next(self) -> None:
-        self.query_one(FindBar).find_next(self.query_one(Editor))
+        _find_next(
+            self.query_one(Editor), self.find_state, notify=self.notify
+        )
 
     def action_find_prev(self) -> None:
-        self.query_one(FindBar).find_next(
-            self.query_one(Editor), backward=True
+        _find_next(
+            self.query_one(Editor), self.find_state,
+            backward=True, notify=self.notify,
         )
+
+    # ── 格式化快捷键 (键义见 formatting.py) ─────────────────
+    def action_format_bold(self) -> None:
+        formatting.toggle_bold(self.query_one(Editor))
+
+    def action_format_italic(self) -> None:
+        formatting.toggle_italic(self.query_one(Editor))
+
+    def action_format_code(self) -> None:
+        formatting.insert_code_block(self.query_one(Editor))
+
+    def action_format_link(self) -> None:
+        formatting.insert_link(self.query_one(Editor))
+
+    def action_format_image(self) -> None:
+        formatting.insert_image(self.query_one(Editor))
 
     # ── 帮助与退出 ──────────────────────────────────────────
     def action_show_help(self) -> None:
@@ -271,15 +308,27 @@ class MDPadApp(App):
     def _on_quit_choice(self, choice: str) -> None:
         if choice == "save":
             if self.file_path is not None:
-                self.action_save()
-                self.exit()
+                asyncio.create_task(self._save_and_exit())
             else:
-                # 未命名文档: 先另存为, 存完自动退出
-                self.push_screen(
-                    PathPrompt("另存为", "未命名.md"), self._save_then_quit
-                )
+                # 未命名文档: 系统另存为, 取消则放弃退出
+                asyncio.create_task(self._quit_via_save_as())
         elif choice == "discard":
             self.exit()
+
+    async def _save_and_exit(self) -> None:
+        await self.action_save()
+        self.exit()
+
+    async def _quit_via_save_as(self) -> None:
+        ok, value = await system_save_file_dialog("未命名.md")
+        if ok and value:
+            self._on_save_as_path(value)
+            self.exit()
+        elif not ok:
+            self.push_screen(
+                PathPrompt("另存为", "未命名.md"), self._save_then_quit
+            )
+        # ok 且空 = 用户取消保存 → 不退出
 
     def _save_then_quit(self, value: str | None) -> None:
         if not value:
@@ -289,5 +338,4 @@ class MDPadApp(App):
             path = path.with_suffix(".md")
         self.file_path = path
         self.file_guard.acquire(str(path))
-        self.action_save()
-        self.exit()
+        asyncio.create_task(self._save_and_exit())
