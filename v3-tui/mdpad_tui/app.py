@@ -39,6 +39,8 @@ class MDPadApp(App):
     """MDPad 终端版应用。"""
 
     TITLE = "MDPad TUI"
+    # 未注册任何命令, 面板是空的; 关掉同时移除 footer 的 ^p 行
+    ENABLE_COMMAND_PALETTE = False
     CSS = """
     #body { height: 1fr; }
     #body > Editor, #body > Preview { width: 100%; }
@@ -49,20 +51,23 @@ class MDPadApp(App):
     #status { height: 1; background: $panel; color: $text-muted; padding: 0 1; }
     HelpScreen, PathPrompt, QuitConfirm { align: center middle; }
     #help-box, #prompt-box, #quit-box {
-        width: auto; height: auto; max-width: 70%;
+        width: 76; height: auto; max-height: 90%;
         padding: 1 2; background: $surface; border: thick $accent;
     }
+    #quit-box { width: 60; }
     #help-hint, #quit-title { margin-top: 1; }
-    #quit-buttons { margin-top: 1; }
+    #quit-buttons { height: 3; margin-top: 1; }
     #quit-buttons Button { margin: 0 1; }
     """
     BINDINGS = [
-        Binding("ctrl+s", "save", "保存"),
-        Binding("ctrl+shift+s", "save_as", "另存为"),
-        Binding("ctrl+o", "open", "打开"),
-        Binding("ctrl+f", "find", "查找"),
-        Binding("ctrl+g", "find_next", "下一个"),
-        Binding("ctrl+shift+g", "find_prev", "上一个"),
+        # 文件/编辑/查找键照常生效但不在 footer 展示:
+        # 只留 5 个可见项, 窄终端也排得开
+        Binding("ctrl+s", "save", "保存", show=False),
+        Binding("ctrl+shift+s", "save_as", "另存为", show=False),
+        Binding("ctrl+o", "open", "打开", show=False),
+        Binding("ctrl+f", "find", "查找", show=False),
+        Binding("ctrl+g", "find_next", "下一个", show=False),
+        Binding("ctrl+shift+g", "find_prev", "上一个", show=False),
         Binding("f1", "show_help", "帮助"),
         Binding("f2", "mode_edit", "编辑"),
         Binding("f3", "mode_preview", "预览"),
@@ -111,7 +116,7 @@ class MDPadApp(App):
                 return mode
         except (OSError, ValueError):
             pass
-        return "edit"
+        return "split"  # 首启默认分屏: 打开即见预览渲染
 
     def _store_mode(self) -> None:
         try:
