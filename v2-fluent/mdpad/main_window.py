@@ -127,7 +127,6 @@ class MainWindow(QMainWindow):
         self.setAcceptDrops(True)
         self.init_ui()
         self.load_settings()
-        self._offer_untitled_recovery()
 
     # ---------- UI ----------
 
@@ -616,8 +615,12 @@ class MainWindow(QMainWindow):
             recovery.drop(key)
         # 「稍后」：草稿留在表里，下次打开这个文件时再问
 
-    def _offer_untitled_recovery(self):
-        """启动时若有未命名草稿就问一次（未命名文档没有别的入口）。"""
+    def offer_untitled_recovery(self):
+        """启动时若有未命名草稿就问一次（未命名文档没有别的入口）。
+
+        **必须等窗口 show() 之后再调用**：这里弹的是遮罩模态框，窗口还没显示时
+        它自己也不会可见，exec() 就会把启动流程永远卡住（进程活着、一个窗口都没有）。
+        """
         self._offer_recovery(recovery.UNTITLED_KEY, self.text_edit.toPlainText(), "未命名文档")
 
     # ---------- 文件操作 ----------

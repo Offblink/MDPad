@@ -2,6 +2,7 @@
 import os
 import sys
 
+from PyQt5.QtCore import QTimer
 from PyQt5.QtWidgets import QApplication
 
 from . import __app_name__, __org_name__, __org_domain__, recovery, singleton
@@ -43,4 +44,7 @@ def run(argv=None):
     window.show()
     if file_path:
         window.open_path(file_path)
+    else:
+        # 未命名草稿的询问要等窗口显示出来（遮罩模态框在窗口可见前弹出会把自己也藏起来）
+        QTimer.singleShot(0, window.offer_untitled_recovery)
     return app.exec_()
