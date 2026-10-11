@@ -28,8 +28,13 @@ class CodeEditor(QPlainTextEdit):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._line_numbers_visible = True
+        self._margin = -1
         self._line_number_area = LineNumberArea(self)
         self.blockCountChanged.connect(lambda _: self.update_line_number_area_width())
+        # 视觉行号：换行宽度变化/正文增减都会改总行数（行号栏宽度跟着位数走）
+        self.document().documentLayout().documentSizeChanged.connect(
+            lambda _: self.update_line_number_area_width()
+        )
         self.updateRequest.connect(self.update_line_number_area)
         self.update_line_number_area_width()
 
@@ -52,11 +57,45 @@ class CodeEditor(QPlainTextEdit):
     def line_number_area_width(self):
         if not self._line_numbers_visible:
             return 0
-        digits = max(2, len(str(max(1, self.blockCount()))))
+        digits = max(2, len(str(self.visual_line_count())))
         return 12 + self.fontMetrics().horizontalAdvance('9') * digits
 
+    def line_height(self):
+        """一个视觉行的高（等宽单字体下每行等高）。"""
+        return max(1, self.fontMetrics().lineSpacing())
+
+    def visual_line_count(self):
+        """整篇视觉行数的估算（软换行的续行也算一行，与 VIMD 的行号口径一致）。
+
+        只用来定行号栏的位数：QPlainTextEdit 不排版整个文档，实测
+        `documentLayout().documentSize()` 返回的是"排过的那部分"（长文档给一行的高度）、
+        滚动条范围在内容短于视口时也给不出内容高度；而逐块 `blockBoundingRect` 会强制
+        排版全文。这里按 "字符数 / 每行容量" 估，O(块数)、不触发布局，宁可略偏大
+        （偏大只是栏宽多一位）。
+        """
+        width = self.viewport().width()
+        unit = max(1, self.fontMetrics().horizontalAdvance('W'))
+        capacity = max(1, width // unit)
+        rows = 0
+        block = self.document().firstBlock()
+        while block.isValid():
+            length = len(block.text())
+            rows += max(1, (length + capacity - 1) // capacity)
+            block = block.next()
+        return max(rows, self.blockCount())
+
+    def visual_line_number(self, block):
+        """某个块第一个视觉行的行号（1 起）。"""
+        top = self.blockBoundingGeometry(block).translated(self.contentOffset()).top()
+        # 文档第一个视觉行的 y = contentOffset().y()（块 0 的几何从 0 起）
+        return max(1, int(round((top - self.contentOffset().y()) / self.line_height())) + 1)
+
     def update_line_number_area_width(self):
-        self.setViewportMargins(self.line_number_area_width(), 0, 0, 0)
+        margin = self.line_number_area_width()
+        if margin == self._margin:
+            return  # 值没变就别再 setViewportMargins（会引发重排）
+        self._margin = margin
+        self.setViewportMargins(margin, 0, 0, 0)
 
     def update_line_number_area(self, rect, dy):
         if not self._line_numbers_visible:
@@ -83,19 +122,22 @@ class CodeEditor(QPlainTextEdit):
         painter.fillRect(event.rect(), self.palette().window())
         painter.setPen(self.palette().text().color())
 
-        block = self.firstVisibleBlock()
-        block_number = block.blockNumber()
-        top = round(
-            self.blockBoundingGeometry(block).translated(self.contentOffset()).top()
-        )
-        bottom = top + round(self.blockBoundingRect(block).height())
+        line_height = self.line_height()
         width = self._line_number_area.width() - 6
-        height = self.fontMetrics().height()
-
+        block = self.firstVisibleBlock()
+        # 坐标必须是整数：drawText 用 float 会抛 TypeError，而绘制事件里的异常会直接
+        # abort 进程（实测退出码 9、没有任何 Python 栈）
+        top = round(self.blockBoundingGeometry(block).translated(self.contentOffset()).top())
         while block.isValid() and top <= event.rect().bottom():
-            if block.isVisible() and bottom >= event.rect().top():
-                painter.drawText(0, top, width, height, Qt.AlignRight, str(block_number + 1))
+            height = round(self.blockBoundingRect(block).height())
+            if block.isVisible():
+                # 视觉行号：块里每个折行都算新行，从块首行号顺次排下来
+                first = self.visual_line_number(block)
+                rows = max(1, round(height / line_height))
+                for row in range(rows):
+                    y = top + row * line_height
+                    if y + line_height < event.rect().top():
+                        continue
+                    painter.drawText(0, y, width, line_height, Qt.AlignRight, str(first + row))
             block = block.next()
-            top = bottom
-            bottom = top + round(self.blockBoundingRect(block).height())
-            block_number += 1
+            top += height
