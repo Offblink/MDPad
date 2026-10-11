@@ -44,14 +44,27 @@ def register(exe_path):
     ctypes.windll.shell32.SHChangeNotify(0x08000000, 0, None, None)
 
 
+def _default_exe():
+    """打包产物路径：onedir 是 dist/MDPad/MDPad.exe，旧 onefile 是 dist/MDPad.exe。"""
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(here, "dist", "MDPad", "MDPad.exe"),
+        os.path.join(here, "dist", "MDPad.exe"),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return candidates[0]
+
+
 def main():
-    exe = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dist", "MDPad.exe")
+    exe = _default_exe()
     if len(sys.argv) > 1:
         exe = sys.argv[1]
     if not os.path.exists(exe):
         ctypes.windll.user32.MessageBoxW(
             0,
-            f"找不到 MDPad.exe：\n{exe}\n\n请确认打包目录 dist 存在，或把 exe 路径作为参数传入。",
+            f"找不到 MDPad.exe：\n{exe}\n\n请确认打包目录 dist/MDPad 存在，或把 exe 路径作为参数传入。",
             "注册文件关联失败", 0x10,
         )
         return 1

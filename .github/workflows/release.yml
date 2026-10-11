@@ -21,7 +21,7 @@ jobs:
       matrix:
         include:
           - app: v2-fluent
-            exe: MDPad-v2-win64.exe
+            artifact: MDPad-v2-win64.zip
     steps:
       - uses: actions/checkout@v4
 
@@ -37,19 +37,23 @@ jobs:
           pip install pyinstaller
           pip install -r ${{ matrix.app }}/requirements.txt
 
-      - name: Build exe with PyInstaller
+      - name: Build with PyInstaller
         run: |
           cd ${{ matrix.app }}/pack
           pyinstaller MDPad.spec
 
-      - name: Rename artifact
-        shell: bash
-        run: mv "${{ matrix.app }}/pack/dist/MDPad.exe" "${{ matrix.app }}/pack/dist/${{ matrix.exe }}"
+      # onedir 产物是 dist/MDPad/ 整个文件夹（MDPad.exe + _internal/），
+      # 打成一个 zip 发布；解压后双击里面的 MDPad.exe 即可（别把 exe 单独挪出来）
+      - name: Package folder
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "${{ matrix.app }}/pack/dist/MDPad/*" `
+                           -DestinationPath "${{ matrix.app }}/pack/dist/${{ matrix.artifact }}" -Force
 
       - uses: actions/upload-artifact@v4
         with:
           name: exe-${{ matrix.app }}
-          path: ${{ matrix.app }}/pack/dist/${{ matrix.exe }}
+          path: ${{ matrix.app }}/pack/dist/${{ matrix.artifact }}
 
   release:
     name: Publish release
@@ -66,5 +70,5 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || '' }}
-          files: exes/*.exe
+          files: exes/*.zip
           generate_release_notes: true

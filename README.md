@@ -51,6 +51,18 @@ python v2-fluent/MDPad.pyw 文档.md    # 启动并打开文件
 > 若再安装 `PyQt6-Fluent-Widgets`，两者共用 `qfluentwidgets` 包名会互相覆盖，启动时报错
 > `TypeError: QToolButton(...): argument 1 has unexpected type 'QWidget'`；重装 `pip install "PyQt-Fluent-Widgets>=1.11"` 即可恢复。
 
+## 打包（生成 exe）
+
+```bash
+cd v2-fluent/pack
+python -m PyInstaller MDPad.spec          # 产出 dist/MDPad/（onedir：MDPad.exe + _internal/）
+python 注册文件关联.pyw                    # 把 .md/.markdown/.txt 关联到 dist/MDPad/MDPad.exe
+```
+
+- **onedir**：产物是 `dist/MDPad/` **整个文件夹** —— 里面的 `MDPad.exe` 只是启动器，库和资源都在同目录 `_internal/`。发版时打包成 zip 分发，**解压后双击文件夹里的 MDPad.exe，别把 exe 单独挪出来**（挪走就找不到 `_internal`）。
+- 之前是 onefile（单个 145 MB 的 exe），每次启动要先把 ~330 MB 解包到 `%TEMP%\_MEIxxxxxx`，到窗口约 10 秒；改成 onedir 后直接从磁盘加载，约 2–3 秒，重复打开同一文件的单例判定也不用再等解包。
+- 注册文件关联脚本会自动在 `dist/MDPad/MDPad.exe` 与旧的 `dist/MDPad.exe` 之间挑存在的那个，也可以把 exe 路径当参数传进去。
+
 ## 功能特性
 
 - 实时 Markdown 预览（GitHub 风格）
