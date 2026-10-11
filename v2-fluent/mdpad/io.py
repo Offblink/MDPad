@@ -3,6 +3,8 @@ import os
 
 import markdown
 
+from .math_ext import MathExtension, has_math, katex_head_html
+
 # 读取时尝试的编码顺序
 READ_ENCODINGS = ['utf-8', 'gbk', 'gb2312', 'gb18030', 'big5', 'latin-1']
 
@@ -68,6 +70,7 @@ EXPORT_HTML_TEMPLATE = """<!DOCTYPE html>
             margin-top: 0.5em;
         }}
     </style>
+    {katex_head}
 </head>
 <body>
     {html_content}
@@ -166,6 +169,8 @@ def render_export_html(markdown_text):
     """把 Markdown 渲染成完整 HTML 文档。"""
     html_content = markdown.markdown(
         markdown_text,
-        extensions=['extra', 'codehilite', 'toc'],
+        extensions=['extra', 'codehilite', 'toc', MathExtension()],
     )
-    return EXPORT_HTML_TEMPLATE.format(html_content=html_content)
+    # 有公式就把 KaTeX 内联进去：导出的单个 HTML 文件不依赖外部资源、断网也能渲染
+    katex_head = katex_head_html() if has_math(html_content) else ''
+    return EXPORT_HTML_TEMPLATE.format(html_content=html_content, katex_head=katex_head)

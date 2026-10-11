@@ -13,6 +13,8 @@ from PyQt5.QtWebChannel import QWebChannel
 import markdown
 
 from .links import classify_navigation_url, local_path_from_navigation, _fix_local_paths
+from .math_ext import KATEX_CSS, KATEX_DIR, KATEX_JS, MathExtension, render_function_js
+from .srcmap import tag_top_blocks
 
 
 # 预览页基础 HTML：样式 + JS→Python 桥 + 外部协议链接拦截
@@ -22,6 +24,7 @@ BASE_HTML = """
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!--mdpad-katex-head-->
     <style>
         /* GitHub风格的Markdown样式 */
         body {
@@ -245,6 +248,34 @@ BASE_HTML = """
         .codehilite .vi { color: #19177C } /* Name.Variable.Instance */
         .codehilite .vm { color: #19177C } /* Name.Variable.Magic */
         .codehilite .il { color: #666666 } /* Literal.Number.Integer.Long */
+
+        /* 数学公式（KaTeX 渲染前的占位元素） */
+        .mdpad-math {
+            white-space: nowrap;
+        }
+
+        .mdpad-math-display {
+            display: block;
+            text-align: center;
+            margin: 1em 0;
+            overflow-x: auto;
+            overflow-y: hidden;
+        }
+
+        .mdpad-math-display .katex-display {
+            margin: 0;
+        }
+
+        /* 查找命中（分屏/预览模式下的预览侧高亮） */
+        mark.mdpad-find {
+            background: #fff3b0;
+            color: inherit;
+            padding: 0;
+        }
+
+        mark.mdpad-find.mdpad-find-active {
+            background: #9ecbff;
+        }
     </style>
     <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
     <script>
@@ -267,6 +298,158 @@ BASE_HTML = """
             e.preventDefault();
             if (window.mdpadBridge) { window.mdpadBridge.openExternal(href); }
         });
+        /*mdpad-render-math*/
+
+        // 查找命中高亮：把预览里所有命中包成 <mark>（当前命中蓝底），
+        // 可选把当前命中滚到视野中间。公式渲染结果（.katex）与脚本/样式跳过，
+        // 免得把 KaTeX 的排版结构拆坏。
+        var mdpadHighlightState = null;
+
+        function mdpadClearHighlight(root) {
+            var marks = (root || document).querySelectorAll('mark.mdpad-find');
+            for (var i = 0; i < marks.length; i++) {
+                var mark = marks[i];
+                var parent = mark.parentNode;
+                if (!parent) { continue; }
+                parent.replaceChild(document.createTextNode(mark.textContent), mark);
+                parent.normalize();
+            }
+        }
+
+        function mdpadHighlight(term, index, caseSensitive, scroll) {
+            var root = document.getElementById('content');
+            if (!root) { return; }
+            mdpadClearHighlight(root);
+            mdpadHighlightState = [term, index, caseSensitive, scroll];
+            if (!term) { return; }
+            var needle = caseSensitive ? term : term.toLowerCase();
+            var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+                acceptNode: function (node) {
+                    if (!node.data) { return NodeFilter.FILTER_REJECT; }
+                    var p = node.parentNode;
+                    while (p && p !== root) {
+                        var name = p.nodeName.toLowerCase();
+                        if (name === 'script' || name === 'style' || name === 'mark') {
+                            return NodeFilter.FILTER_REJECT;
+                        }
+                        if (p.classList && p.classList.contains('katex')) {
+                            return NodeFilter.FILTER_REJECT;
+                        }
+                        p = p.parentNode;
+                    }
+                    return NodeFilter.FILTER_ACCEPT;
+                }
+            });
+            var nodes = [];
+            var node;
+            while ((node = walker.nextNode())) { nodes.push(node); }
+            var marks = [];
+            for (var i = 0; i < nodes.length; i++) {
+                var text = nodes[i].data;
+                var hay = caseSensitive ? text : text.toLowerCase();
+                var at = hay.indexOf(needle);
+                if (at < 0) { continue; }
+                var frag = document.createDocumentFragment();
+                var cursor = 0;
+                while (at >= 0) {
+                    if (at > cursor) { frag.appendChild(document.createTextNode(text.slice(cursor, at))); }
+                    var mark = document.createElement('mark');
+                    mark.className = 'mdpad-find';
+                    mark.textContent = text.slice(at, at + term.length);
+                    frag.appendChild(mark);
+                    marks.push(mark);
+                    cursor = at + term.length;
+                    at = hay.indexOf(needle, cursor);
+                }
+                if (cursor < text.length) { frag.appendChild(document.createTextNode(text.slice(cursor))); }
+                nodes[i].parentNode.replaceChild(frag, nodes[i]);
+            }
+            if (!marks.length) { return; }
+            var active = marks[Math.min(Math.max(index, 0), marks.length - 1)];
+            active.className = 'mdpad-find mdpad-find-active';
+            if (scroll) {
+                var box = active.getBoundingClientRect();
+                var target = window.scrollY + box.top - (window.innerHeight / 2) + (box.height / 2);
+                mdpadScrollTo(Math.max(0, target));
+            }
+        }
+
+        // 内容重建（每次更新都是整块 innerHTML 替换）后重新包一遍，但不抢滚动位置
+        function mdpadReapplyHighlight() {
+            if (!mdpadHighlightState) { return; }
+            mdpadHighlight(mdpadHighlightState[0], mdpadHighlightState[1],
+                           mdpadHighlightState[2], false);
+        }
+
+        // 跟随光标滚动：把光标所在源码行对应的块钉在可见区底边。
+        // 语义与 VIMD 一致——预览被推到最底下时才跟随；用户自己滚开（不在底部）即停跟，
+        // 滚回底部（滚轮/End）自动恢复。标记（<!--mdpad-src:N-->）在内容里是注释节点，
+        // 注释没有布局盒，位置靠它的兄弟节点量（见 mdpadMarkerY）。
+        var mdpadFollowArmed = true;
+        var mdpadSelfScroll = false;
+
+        // 程序自己滚（跟随 / 更新内容后恢复位置）要先打标记，否则会被下面
+        // 的 scroll 监听当成"用户滚开"而误停跟；标记用定时器清，避免没有滚动
+        // 事件时把下一次真实滚动吞掉。
+        function mdpadScrollTo(y) {
+            mdpadSelfScroll = true;
+            window.scrollTo(0, y);
+            setTimeout(function () { mdpadSelfScroll = false; }, 120);
+        }
+
+        window.addEventListener('scroll', function () {
+            if (mdpadSelfScroll) { return; }
+            mdpadFollowArmed =
+                (window.scrollY + window.innerHeight) >= (document.body.scrollHeight - 4);
+        });
+
+        function mdpadFollowCursor(line) {
+            var root = document.getElementById('content');
+            if (!root) { return; }
+            if (!mdpadFollowArmed) { return; }
+            var PREFIX = 'mdpad-src:';
+            var walker = document.createTreeWalker(root, NodeFilter.SHOW_COMMENT, null);
+            var y = null;
+            var node;
+            while ((node = walker.nextNode())) {
+                var data = node.data || '';
+                if (data.indexOf(PREFIX) !== 0) { continue; }
+                var n = parseInt(data.slice(PREFIX.length), 10);
+                if (isNaN(n) || n > line) { continue; }
+                var marker = mdpadMarkerY(node);
+                if (marker !== null) { y = marker; }
+            }
+            if (y === null) { return; }
+            var viewH = window.innerHeight;
+            if (y > window.scrollY + viewH - 40) {
+                mdpadScrollTo(Math.max(0, y - viewH + 60));
+            }
+        }
+
+        // 注释节点没有布局盒（Range 也量不到位置），靠它的下一个兄弟节点定位；
+        // 没有下一个兄弟（块在文档末尾）时退到上一个兄弟的底边。
+        function mdpadMarkerY(node) {
+            var sib = node.nextSibling;
+            while (sib && sib.nodeType === 3 && !sib.data.trim()) { sib = sib.nextSibling; }
+            if (sib) {
+                var range = document.createRange();
+                range.setStartBefore(sib);
+                range.setEndAfter(sib);
+                var box = range.getBoundingClientRect();
+                if (box.height || box.width) { return window.scrollY + box.top; }
+                if (sib.nodeType === 1) {
+                    var rect = sib.getBoundingClientRect();
+                    if (rect.height || rect.width) { return window.scrollY + rect.top; }
+                }
+            }
+            var prev = node.previousSibling;
+            while (prev && prev.nodeType === 3 && !prev.data.trim()) { prev = prev.previousSibling; }
+            if (prev && prev.nodeType === 1) {
+                var prevRect = prev.getBoundingClientRect();
+                if (prevRect.height || prevRect.width) { return window.scrollY + prevRect.bottom; }
+            }
+            return null;
+        }
     </script>
 </head>
 <body>
@@ -274,6 +457,19 @@ BASE_HTML = """
 </body>
 </html>
 """
+
+# KaTeX 资产：以 file:// URI 直接引用（预览页的 base_url 是本地目录，
+# LocalContentCanAccessFileUrls 已开）。资产缺失时公式退回原文显示。
+if KATEX_CSS.is_file() and KATEX_JS.is_file():
+    _KATEX_HEAD_HTML = (
+        f'    <link rel="stylesheet" href="{KATEX_CSS.as_uri()}">\n'
+        f'    <script src="{KATEX_JS.as_uri()}"></script>\n'
+    )
+else:  # pragma: no cover - 随仓库分发，缺失只可能是打包漏了资产
+    _KATEX_HEAD_HTML = '    <!-- KaTeX 资产缺失：公式按原文显示 -->\n'
+
+BASE_HTML = BASE_HTML.replace('    <!--mdpad-katex-head-->', _KATEX_HEAD_HTML)
+BASE_HTML = BASE_HTML.replace('        /*mdpad-render-math*/', render_function_js())
 
 
 class _ExternalLinkBridge(QObject):
@@ -336,6 +532,8 @@ class MarkdownPreview(QWebEngineView):
         self._current_markdown = ""
         self._base_dir = None  # 当前预览的相对路径基准目录（当前 Markdown 文件所在目录）
         self._base_html = BASE_HTML
+        # 查找命中高亮状态：内容重建后据此重包（term, index, case_sensitive）
+        self._highlight_state = None
 
         # 连接加载完成信号
         self.loadFinished.connect(self._on_load_finished)
@@ -349,12 +547,14 @@ class MarkdownPreview(QWebEngineView):
 
             # 恢复滚动位置
             if self._scroll_position > 0:
-                self.page().runJavaScript(f"window.scrollTo(0, {self._scroll_position});")
+                self.page().runJavaScript(f"mdpadScrollTo(0, {self._scroll_position});")
 
             # 如果有待更新的内容，现在更新
             if self._pending_update is not None:
                 self._update_content_with_js(self._pending_update)
                 self._pending_update = None
+            if self._highlight_state:
+                self.page().runJavaScript("mdpadReapplyHighlight();")
 
     def _save_scroll_position(self, position):
         """JavaScript回调函数，用于保存滚动位置"""
@@ -381,8 +581,11 @@ class MarkdownPreview(QWebEngineView):
                     // 更新内容
                     contentDiv.innerHTML = {escaped_content};
 
-                    // 恢复滚动位置
-                    window.scrollTo(0, scrollTop);
+                    // 渲染数学公式（KaTeX）
+                    if (window.mdpadRenderMath) {{ window.mdpadRenderMath(contentDiv); }}
+
+                    // 恢复滚动位置（走 mdpadScrollTo：自己滚的，不该被当成用户滚开）
+                    mdpadScrollTo(scrollTop);
                 }}
             }} catch (e) {{
                 console.error('更新内容时出错:', e);
@@ -391,6 +594,30 @@ class MarkdownPreview(QWebEngineView):
         """
 
         self.page().runJavaScript(js_code)
+        if self._highlight_state:
+            # 内容整块重建后 <mark> 也没了，重包一遍（不抢滚动位置）
+            self.page().runJavaScript("mdpadReapplyHighlight();")
+
+    def highlight(self, term, index=0, case_sensitive=False, scroll=True):
+        """在预览里高亮所有命中，当前命中（index，0 起）蓝底，可选滚到视野中间。
+
+        term 为空即清除高亮。高亮会在预览内容重建后自动重包（见 _update_content_with_js）。
+        """
+        self._highlight_state = (term or "", int(index), bool(case_sensitive)) if term else None
+        if not self._is_initialized:
+            return
+        payload = json.dumps([term or "", int(index), bool(case_sensitive), bool(scroll)])
+        self.page().runJavaScript(f"mdpadHighlight.apply(null, {payload});")
+
+    def follow_cursor(self, source_line):
+        """把光标所在源码行对应的块推到预览可见区（只向下推进，绝不回滚）。
+
+        语义与 VIMD 一致：光标行的块掉到视野下方才滚；用户自己往上翻即停止跟随，
+        重新写到底部又会自然跟上。
+        """
+        if not self._is_initialized:
+            return
+        self.page().runJavaScript(f"mdpadFollowCursor({int(source_line)});")
 
     def update_preview(self, markdown_text):
         """更新预览内容"""
@@ -404,9 +631,11 @@ class MarkdownPreview(QWebEngineView):
                 'markdown.extensions.tables',
                 'markdown.extensions.fenced_code',
                 'markdown.extensions.nl2br',
+                MathExtension(),
             ]
 
-            html_content = markdown.markdown(markdown_text, extensions=extensions)
+            # 顶层块先打上源码行号标记（跟随光标用；标记是 HTML 注释，不影响显示）
+            html_content = markdown.markdown(tag_top_blocks(markdown_text), extensions=extensions)
             # 修正本地路径引用（Windows 盘符、反斜杠）
             html_content = _fix_local_paths(html_content)
 
@@ -420,7 +649,9 @@ class MarkdownPreview(QWebEngineView):
                 self._is_initialized = False
                 self._pending_update = html_content
                 self._scroll_position = 0  # 打开新文档从顶部开始
-                base_url = QUrl.fromLocalFile(base_dir + os.sep) if base_dir else QUrl()
+                base_url = QUrl.fromLocalFile(
+                    base_dir + os.sep if base_dir else str(KATEX_DIR) + os.sep
+                )
                 # 加载基本HTML页面，并指定基准目录
                 self.setHtml(self._base_html, base_url)
             else:

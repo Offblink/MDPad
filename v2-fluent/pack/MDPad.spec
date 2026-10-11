@@ -2,7 +2,8 @@
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 # qfluentwidgets 的 QSS/资源文件与动态子模块需显式收集
-datas = [('../icon.ico', '.')] + collect_data_files('qfluentwidgets')
+# KaTeX 资产（公式渲染）随包分发，供预览页与导出 HTML 使用
+datas = [('../icon.ico', '.'), ('../mdpad/assets', 'mdpad/assets')] + collect_data_files('qfluentwidgets')
 hiddenimports = collect_submodules('qfluentwidgets')
 
 a = Analysis(

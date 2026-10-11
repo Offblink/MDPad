@@ -265,6 +265,46 @@ class FindReplaceDialog(QDialog):
             return
         count = count_matches(self._editor.document(), query, self._case_sensitive())
         self.count_label.setText(f"共 {count} 处" if count else "无匹配")
+        # 查找词变化时同步预览高亮（不抢滚动；分屏/预览模式才可见）
+        self._highlight_preview(scroll=False)
+
+    # ---------- 预览侧高亮（分屏/预览模式下，编辑区照旧正常选中） ----------
+
+    def _preview(self):
+        preview = getattr(self._main, "preview", None)
+        if preview is None or not preview.isVisible():
+            return None
+        return preview
+
+    def _highlight_preview(self, scroll):
+        preview = self._preview()
+        if preview is None:
+            return
+        query = self._query()
+        if not query:
+            preview.highlight("")
+            return
+        preview.highlight(query, self._preview_ordinal(query), self._case_sensitive(), scroll)
+
+    def _preview_ordinal(self, query):
+        """当前命中在全文命中里的序号（0 起），用来对齐预览里"当前"那一处。"""
+        cursor = self._editor.textCursor()
+        limit = cursor.selectionStart() if cursor.hasSelection() else cursor.position()
+        flags = _find_flags(self._case_sensitive())
+        document = self._editor.document()
+        index = 0
+        found = document.find(query, 0, flags)
+        while not found.isNull() and found.selectionStart() < limit:
+            index += 1
+            found = document.find(query, found.selectionEnd(), flags)
+        return index
+
+    def hideEvent(self, event):
+        """关闭查找窗时把预览高亮清掉（免得留下一地黄底）。"""
+        preview = self._preview()
+        if preview is not None:
+            preview.highlight("")
+        super().hideEvent(event)
 
     # ---------- 查找 ----------
 
@@ -297,6 +337,7 @@ class FindReplaceDialog(QDialog):
             return
         self._editor.setTextCursor(found)
         self._editor.ensureCursorVisible()
+        self._highlight_preview(scroll=True)
         if wrapped:
             self._main.notify(
                 "info", "查找",
@@ -354,4 +395,5 @@ class FindReplaceDialog(QDialog):
             c.setPosition(end, QTextCursor.KeepAnchor)
             c.insertText(replacement)
         self._editor.setTextCursor(QTextCursor(document))
+        self._highlight_preview(scroll=False)
         self._main.notify("success", "替换", f"已替换 {len(spans)} 处", duration=2500)

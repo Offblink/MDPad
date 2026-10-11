@@ -5,7 +5,7 @@ import threading
 from PyQt5.QtCore import Qt, QSettings, QObject, pyqtSignal, QTimer
 from PyQt5.QtGui import QFont, QIcon, QTextCursor, QDragEnterEvent, QDropEvent, QKeySequence
 from PyQt5.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QTextEdit, QSplitter,
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QStatusBar, QFileDialog, QShortcut,
 )
 from qfluentwidgets import (
@@ -15,9 +15,10 @@ from qfluentwidgets import (
 )
 
 from .preview import MarkdownPreview
+from .editor import CodeEditor
 from .dialogs import HelpDialog, _font_scale, _apply_font_scale
 from .search import FindReplaceDialog
-from . import io, ai_naming, __app_name__, __org_name__
+from . import io, ai_naming, recovery, __app_name__, __org_name__
 
 
 class _AiWorker(QObject):
@@ -36,18 +37,22 @@ class _AiWorker(QObject):
 
 
 class SaveChangesDialog(MessageBoxBase):
-    """三路保存确认：保存 / 不保存 / 取消。"""
+    """三路选择框（默认 保存/不保存/取消；恢复草稿时换成 恢复/丢弃/稍后）。
 
-    def __init__(self, parent=None):
+    choice 按按钮位置取值：save=第一个、discard=第二个、cancel=第三个。
+    """
+
+    def __init__(self, parent=None, title="保存更改", content="文件已修改，是否保存更改？",
+                 labels=("保存", "不保存", "取消")):
         super().__init__(parent)
         self.choice = "cancel"
-        self.titleLabel = SubtitleLabel("保存更改")
-        self.contentLabel = BodyLabel("文件已修改，是否保存更改？")
+        self.titleLabel = SubtitleLabel(title)
+        self.contentLabel = BodyLabel(content)
         self.viewLayout.addWidget(self.titleLabel)
         self.viewLayout.addWidget(self.contentLabel)
-        self.saveBtn = PrimaryPushButton("保存")
-        self.discardBtn = PushButton("不保存")
-        self.cancelBtn = PushButton("取消")
+        self.saveBtn = PrimaryPushButton(labels[0])
+        self.discardBtn = PushButton(labels[1])
+        self.cancelBtn = PushButton(labels[2])
         self.saveBtn.clicked.connect(self._choose_save)
         self.discardBtn.clicked.connect(self._choose_discard)
         self.cancelBtn.clicked.connect(self._choose_cancel)
@@ -108,10 +113,21 @@ class MainWindow(QMainWindow):
         self._preview_timer.setSingleShot(True)
         self._preview_timer.setInterval(150)
         self._preview_timer.timeout.connect(self._flush_preview)
+        # 预览跟随光标：光标移动的节流（连续移动合并成一次 JS 调用）
+        self._follow_timer = QTimer(self)
+        self._follow_timer.setSingleShot(True)
+        self._follow_timer.setInterval(80)
+        self._follow_timer.timeout.connect(self._follow_cursor_now)
+        # 自动恢复日志：编辑停顿 500ms 后写草稿（未保存的修改不怕强杀/断电）
+        self._recovery_timer = QTimer(self)
+        self._recovery_timer.setSingleShot(True)
+        self._recovery_timer.setInterval(500)
+        self._recovery_timer.timeout.connect(self._write_recovery)
         # 启用拖放功能（编辑/预览组件自身不拦截）
         self.setAcceptDrops(True)
         self.init_ui()
         self.load_settings()
+        self._offer_untitled_recovery()
 
     # ---------- UI ----------
 
@@ -164,8 +180,15 @@ class MainWindow(QMainWindow):
         self.header_btn = self._text_button("H", "插入标题", self.insert_header)
         self.link_btn = self._tool_button(FluentIcon.LINK, "插入链接 (Ctrl+L)", self.insert_link)
         self.code_btn = self._tool_button(FluentIcon.CODE, "插入代码块 (Ctrl+K)", self.insert_code_block)
-        for btn in (self.bold_btn, self.italic_btn, self.header_btn, self.link_btn, self.code_btn):
+        self.image_btn = self._tool_button(FluentIcon.PHOTO, "插入图片 (Ctrl+Shift+L)", self.insert_image)
+        for btn in (self.bold_btn, self.italic_btn, self.header_btn, self.link_btn, self.code_btn, self.image_btn):
             bar.addWidget(btn)
+
+        bar.addSpacing(12)
+
+        # 行号显示开关（Alt+L）
+        self.line_number_btn = self._tool_button(FluentIcon.FONT_SIZE, "显示行号 (Alt+L)", self.toggle_line_numbers)
+        bar.addWidget(self.line_number_btn)
 
         bar.addSpacing(12)
 
@@ -199,6 +222,9 @@ class MainWindow(QMainWindow):
             ("Ctrl+I", lambda: self.insert_formatting("*", "*")),
             ("Ctrl+K", self.insert_code_block),
             ("Ctrl+L", self.insert_link),
+            ("Ctrl+Shift+L", self.insert_image),
+            ("Ctrl+R", self.reload_file),
+            ("Alt+L", self.toggle_line_numbers),
             ("F2", lambda: self.set_editing_mode(True)),
             ("F3", lambda: self.set_editing_mode(False)),
             ("F4", self.toggle_split_view),
@@ -228,10 +254,14 @@ class MainWindow(QMainWindow):
     def build_editor_area(self):
         self.editor_splitter = QSplitter(Qt.Horizontal)
 
-        self.text_edit = QTextEdit()
+        self.text_edit = CodeEditor()
         self.text_edit.setFont(QFont("Consolas", 11))
         self.text_edit.textChanged.connect(self.update_preview)
+        self.text_edit.textChanged.connect(self._schedule_recovery)
         self.text_edit.cursorPositionChanged.connect(self.update_cursor_position)
+        # 选区变化（含"折叠选区但光标位置没动"）也要刷新字数显示
+        self.text_edit.selectionChanged.connect(self.update_cursor_position)
+        self.text_edit.cursorPositionChanged.connect(self.schedule_follow)
         # 编辑框自身不拦截拖放，交给父窗口处理
         self.text_edit.setAcceptDrops(False)
 
@@ -247,6 +277,9 @@ class MainWindow(QMainWindow):
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
         self.cursor_position_label = BodyLabel("行: 1, 列: 1")
+        # 选中文段时显示字数（含标点与空格；折行不算）
+        self.selection_label = BodyLabel("")
+        self.status_bar.addPermanentWidget(self.selection_label)
         self.status_bar.addPermanentWidget(self.cursor_position_label)
 
     def apply_theme(self):
@@ -323,6 +356,9 @@ class MainWindow(QMainWindow):
             self.set_editing_mode(False)
         else:
             self.set_split_mode(True)
+        visible = self.settings.value("line_numbers")
+        if visible is not None:
+            self.text_edit.set_line_numbers_visible(str(visible).lower() in ("true", "1"))
 
     def save_settings(self):
         self.settings.setValue("geometry", self.saveGeometry())
@@ -330,6 +366,7 @@ class MainWindow(QMainWindow):
         if self._split_sizes:
             self.settings.setValue("split_sizes", self._split_sizes)
         self.settings.setValue("view_mode", self._mode_key())
+        self.settings.setValue("line_numbers", self.text_edit.line_numbers_visible())
 
     def open_path(self, file_path):
         """打开命令行/文件关联传入的路径（含非 Markdown 扩展名确认）。"""
@@ -356,6 +393,13 @@ class MainWindow(QMainWindow):
             event.accept()
         else:
             event.ignore()
+
+    def raise_window(self):
+        """被第二个实例唤醒：把窗口抬到前台（最小化则先还原）。"""
+        if self.isMinimized():
+            self.showNormal()
+        self.raise_()
+        self.activateWindow()
 
     def notify(self, level, title, content, duration=3000):
         """Fluent InfoBar 提示。level: success / info / warning / error"""
@@ -447,6 +491,18 @@ class MainWindow(QMainWindow):
         line = cursor.blockNumber() + 1
         column = cursor.columnNumber() + 1
         self.cursor_position_label.setText(f"行: {line}, 列: {column}")
+        selected = cursor.selection().toPlainText() if cursor.hasSelection() else ""
+        self.selection_label.setText(f"选中 {len(selected)} 字" if selected else "")
+
+    def schedule_follow(self):
+        """光标移动后调度一次预览跟随（节流：落到定时器里合并连续移动）。"""
+        if self.split_mode and self.preview.isVisible() and self.text_edit.isVisible():
+            self._follow_timer.start()
+
+    def _follow_cursor_now(self):
+        if not (self.split_mode and self.preview.isVisible() and self.text_edit.isVisible()):
+            return
+        self.preview.follow_cursor(self.text_edit.textCursor().blockNumber() + 1)
 
     def update_preview(self):
         """调度预览更新（防抖：150ms 内的连续输入只渲染一次）。"""
@@ -457,6 +513,8 @@ class MainWindow(QMainWindow):
         """防抖定时器到点后真正渲染一次预览。"""
         if self.preview.isVisible():
             self.preview.update_preview(self.text_edit.toPlainText())
+            # 内容重建后标记也重建了，再跟一次光标（否则新写入的块不会滚进视野）
+            self.schedule_follow()
 
     # ---------- 格式插入 ----------
 
@@ -496,6 +554,72 @@ class MainWindow(QMainWindow):
             cursor.movePosition(QTextCursor.Up, QTextCursor.MoveAnchor, 1)
         self.text_edit.setTextCursor(cursor)
 
+    def insert_image(self):
+        """插入图片语法（Ctrl+Shift+L）。"""
+        cursor = self.text_edit.textCursor()
+        if cursor.hasSelection():
+            selected_text = cursor.selectedText()
+            cursor.insertText(f"![{selected_text}](path)")
+        else:
+            cursor.insertText("![图片说明](path)")
+        cursor.movePosition(QTextCursor.Left, QTextCursor.MoveAnchor, 5)  # 落在括号内、path 前
+        self.text_edit.setTextCursor(cursor)
+
+    # ---------- 视图开关 ----------
+
+    def toggle_line_numbers(self):
+        """显示/隐藏编辑区行号（Alt+L），并记住选择。"""
+        editor = self.text_edit
+        if editor.set_line_numbers_visible(not editor.line_numbers_visible()):
+            self.settings.setValue("line_numbers", editor.line_numbers_visible())
+
+    # ---------- 自动恢复日志 ----------
+
+    def _recovery_key(self):
+        """当前文档在草稿表里的键（未命名文档自成一类）。"""
+        return recovery.file_key(self.current_file)
+
+    def _schedule_recovery(self):
+        self._recovery_timer.start()
+
+    def _write_recovery(self):
+        """编辑停顿后落一次草稿：有未保存修改就写；改回与磁盘一致才清掉自己那条。"""
+        key = self._recovery_key()
+        text = self.text_edit.toPlainText()
+        if self.text_edit.document().isModified():
+            recovery.put_text(key, text)
+        elif recovery.get_text(key) == text:
+            # 已一致：草稿没用了（别的文件的草稿不动）
+            recovery.drop(key)
+
+    def _offer_recovery(self, key, disk_text, subject):
+        """有草稿且与磁盘内容不一致时问要不要恢复（恢复 / 丢弃 / 稍后）。"""
+        draft = recovery.get_text(key)
+        if draft is None:
+            return
+        if draft == disk_text:
+            recovery.drop(key)
+            return
+        dialog = SaveChangesDialog(
+            self, "恢复草稿",
+            f"{subject}有未保存的修改（{len(draft)} 字），上次没能正常保存。要恢复吗？",
+            labels=("恢复", "丢弃", "稍后"),
+        )
+        self._run_modal(dialog)
+        if dialog.choice == "save":
+            cursor = self.text_edit.textCursor()
+            self.text_edit.setPlainText(draft)
+            self.text_edit.setTextCursor(cursor)
+            self.text_edit.document().setModified(True)
+            self.notify("info", "已恢复草稿", "内容还没有写回磁盘，记得保存 (Ctrl+S)")
+        elif dialog.choice == "discard":
+            recovery.drop(key)
+        # 「稍后」：草稿留在表里，下次打开这个文件时再问
+
+    def _offer_untitled_recovery(self):
+        """启动时若有未命名草稿就问一次（未命名文档没有别的入口）。"""
+        self._offer_recovery(recovery.UNTITLED_KEY, self.text_edit.toPlainText(), "未命名文档")
+
     # ---------- 文件操作 ----------
 
     def _lock_current_file(self):
@@ -534,6 +658,10 @@ class MainWindow(QMainWindow):
         # 强制更新预览，无论其当前是否可见；取消 setPlainText 触发的待定防抖渲染，避免重复
         self._preview_timer.stop()
         self.preview.update_preview(content)
+        # 上次异常退出留下的草稿：与磁盘内容不一致时问要不要恢复
+        self._offer_recovery(
+            recovery.file_key(file_path), content, f'"{os.path.basename(file_path)}" 上次关闭前'
+        )
 
     def save_file(self):
         if self.current_file:
@@ -564,6 +692,9 @@ class MainWindow(QMainWindow):
     def save_to_file(self, file_path):
         try:
             io.write_text_file(file_path, self.text_edit.toPlainText())
+            # 落盘成功：旧身份（未命名/旧路径）与新路径的草稿都清掉
+            recovery.drop(self._recovery_key())
+            recovery.drop(recovery.file_key(file_path))
             self.current_file = file_path
             self._lock_current_file()
             self.setWindowTitle(f'MDPad - {os.path.basename(file_path)}')
@@ -596,16 +727,40 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.notify("error", "导出失败", str(e))
 
+    def reload_file(self):
+        """按磁盘内容重建缓冲区（Ctrl+R）。有未保存改动时先问怎么处理。"""
+        if not self.current_file:
+            self.notify("warning", "无法重新加载", "当前文档还没有对应的磁盘文件。")
+            return
+        if self.text_edit.document().isModified():
+            dialog = SaveChangesDialog(
+                self, "重新加载", "文件已修改，重新加载会丢弃这些改动。是否先保存？"
+            )
+            self._run_modal(dialog)
+            if dialog.choice == "cancel":
+                return
+            if dialog.choice == "save":
+                self.save_to_file(self.current_file)
+                if self.text_edit.document().isModified():
+                    return  # 保存失败/未写盘，就不动缓冲区
+        self.load_file(self.current_file)
+
     def check_save_changes(self):
-        """返回 True 表示可以继续（放弃或已保存），False 表示用户取消。"""
+        """返回 True 表示可以继续（放弃或已保存），False 表示用户取消。
+
+        选「保存」时以是否真的写盘为准：保存未落盘（另存为被取消、写盘失败）就
+        中止后续动作，否则会把没保存的内容丢掉（VIMD 的同一口径）。
+        """
         if not self.text_edit.document().isModified():
             return True
         dialog = SaveChangesDialog(self)
         self._run_modal(dialog)
         if dialog.choice == "save":
             self.save_file()
-            return True
+            return not self.text_edit.document().isModified()
         if dialog.choice == "discard":
+            # 用户明确丢弃：草稿也别留着（否则下次打开又问一遍）
+            recovery.drop(self._recovery_key())
             return True
         return False
 
