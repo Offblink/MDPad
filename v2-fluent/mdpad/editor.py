@@ -1,7 +1,17 @@
 """编辑器：QPlainTextEdit + 行号栏（可开关）。
 
-行号按块（视觉行）标：软换行的续行不编号，编号只出现在每个块的第一视觉行，
-和左栏文字对齐。关掉行号时栏宽归零，不占地方。
+行号按"视觉行"标：软换行的续行也算一行（与 VIMD 口径一致），编号从文档第一行
+顺次排下来、不跳号也不重头开始。关掉行号时栏宽归零，不占地方。
+
+编号只能"数出来"，不能用几何反推（`块顶 y ÷ 行高`）——实测两种错法：
+- 行高不齐：带 emoji 的块高 33px，而 `fontMetrics().lineSpacing()` 是 26px，每过一行
+  就多算约半行，编号越往下越偏（第 6 行显示 7、第 22 行显示 25，中间还跳号）；
+- 懒排版：`QPlainTextDocumentLayout` 只排到视口附近，一旦发生滚动跳转，块几何的原点就
+  可能是那个排版窗口而不是文档开头（实测跳到底部后首可见块几何 top 与
+  `contentOffset().y()` 都是 0），编号从 1 重排。
+几何只用来定 y（它是视口坐标，恒正确）。行数"数出来"：块已排版的用它自己的折行数，
+没排版的（视口外）按文本宽度估；整篇前缀按 (revision, 可用宽度, 字体) 缓存，视口里
+发现前缀是旧估算算的（块刚排版出来、行数对不上）就重算一次并整栏重画。
 """
 from PyQt5.QtCore import QSize, Qt
 from PyQt5.QtGui import QPainter
@@ -29,6 +39,7 @@ class CodeEditor(QPlainTextEdit):
         super().__init__(parent)
         self._line_numbers_visible = True
         self._margin = -1
+        self._rows_cache = None
         self._line_number_area = LineNumberArea(self)
         self.blockCountChanged.connect(lambda _: self.update_line_number_area_width())
         # 视觉行号：换行宽度变化/正文增减都会改总行数（行号栏宽度跟着位数走）
@@ -65,30 +76,47 @@ class CodeEditor(QPlainTextEdit):
         return max(1, self.fontMetrics().lineSpacing())
 
     def visual_line_count(self):
-        """整篇视觉行数的估算（软换行的续行也算一行，与 VIMD 的行号口径一致）。
+        """整篇的视觉行数（软换行的续行也算一行），只用来定行号栏的位数。"""
+        return self.visual_row_prefix()[-1]
 
-        只用来定行号栏的位数：QPlainTextEdit 不排版整个文档，实测
-        `documentLayout().documentSize()` 返回的是"排过的那部分"（长文档给一行的高度）、
-        滚动条范围在内容短于视口时也给不出内容高度；而逐块 `blockBoundingRect` 会强制
-        排版全文。这里按 "字符数 / 每行容量" 估，O(块数)、不触发布局，宁可略偏大
-        （偏大只是栏宽多一位）。
+    def visual_row_prefix(self, force=False):
+        """每块之前的视觉行数：prefix[i] = 第 i 块之前排了几个视觉行。
+
+        len(prefix) == blockCount + 1，prefix[-1] 即全篇行数。行数优先取控件自己
+        排版的结果（`block.layout().lineCount()`，O(1) 且与显示严格一致）；没排过的
+        块按文本宽度估（不触发布局）。按 (文档 revision, 可用宽度, 字体) 缓存：
+        正文、换行宽度、字号任一变化才重算，force=True 时无视缓存。
         """
-        width = self.viewport().width()
-        unit = max(1, self.fontMetrics().horizontalAdvance('W'))
-        capacity = max(1, width // unit)
-        rows = 0
+        key = (self.document().revision(), self.viewport().width(), self.font().key())
+        cache = self._rows_cache
+        if cache is not None and not force and cache[0] == key:
+            return cache[1]
+        metrics = self.fontMetrics()
+        width = max(1, self.viewport().width())
+        # 单字形宽度上限：整行字符数 × 它都不超过可用宽度，就一定不折行
+        widest = max(metrics.maxWidth(), metrics.horizontalAdvance('W'),
+                     metrics.horizontalAdvance('国'), metrics.horizontalAdvance('✅️'))
+        prefix = [0]
+        total = 0
         block = self.document().firstBlock()
         while block.isValid():
-            length = len(block.text())
-            rows += max(1, (length + capacity - 1) // capacity)
+            layout = block.layout()
+            rows = layout.lineCount() if layout is not None else 0
+            if rows <= 0:  # 未排版：退回宽度估算
+                text = block.text()
+                length = len(text)
+                if length == 0:
+                    rows = 1
+                elif length * widest <= width:
+                    rows = 1
+                else:
+                    advance = metrics.horizontalAdvance(text)
+                    rows = max(1, (advance + width - 1) // width)
+            total += rows
+            prefix.append(total)
             block = block.next()
-        return max(rows, self.blockCount())
-
-    def visual_line_number(self, block):
-        """某个块第一个视觉行的行号（1 起）。"""
-        top = self.blockBoundingGeometry(block).translated(self.contentOffset()).top()
-        # 文档第一个视觉行的 y = contentOffset().y()（块 0 的几何从 0 起）
-        return max(1, int(round((top - self.contentOffset().y()) / self.line_height())) + 1)
+        self._rows_cache = (key, prefix)
+        return prefix
 
     def update_line_number_area_width(self):
         margin = self.line_number_area_width()
@@ -118,26 +146,44 @@ class CodeEditor(QPlainTextEdit):
         )
 
     def paint_line_numbers(self, event):
+        if self._paint_numbers(event, self.visual_row_prefix()):
+            # 视口里有块的行数跟前缀对不上：前缀是按"那时还没排版的块"估的。
+            # 重算前缀并整栏重画（下一次绘制就用准确行数）。
+            self.visual_row_prefix(force=True)
+            self._line_number_area.update()
+
+    def _paint_numbers(self, event, prefix):
+        """按 prefix 画编号；返回是否发现视口里的块跟前缀对不上（前缀是旧的估算）。"""
         painter = QPainter(self._line_number_area)
         painter.fillRect(event.rect(), self.palette().window())
         painter.setPen(self.palette().text().color())
 
         line_height = self.line_height()
         width = self._line_number_area.width() - 6
+        stale = False
         block = self.firstVisibleBlock()
         # 坐标必须是整数：drawText 用 float 会抛 TypeError，而绘制事件里的异常会直接
         # abort 进程（实测退出码 9、没有任何 Python 栈）
         top = round(self.blockBoundingGeometry(block).translated(self.contentOffset()).top())
-        while block.isValid() and top <= event.rect().bottom():
+        event_top = event.rect().top()
+        event_bottom = event.rect().bottom()
+        while block.isValid() and top <= event_bottom:
             height = round(self.blockBoundingRect(block).height())
             if block.isVisible():
-                # 视觉行号：块里每个折行都算新行，从块首行号顺次排下来
-                first = self.visual_line_number(block)
-                rows = max(1, round(height / line_height))
+                # 本块首个视觉行的编号 = 前面所有块的行数之和 + 1；
+                # 块里每个折行顺次 +1（编号是数出来的，跟 y 无关）
+                index = block.blockNumber()
+                rows = max(1, prefix[index + 1] - prefix[index])
+                layout = block.layout()
+                if layout is not None and layout.lineCount() > 0 and layout.lineCount() != rows:
+                    stale = True
+                first = prefix[index] + 1
                 for row in range(rows):
                     y = top + row * line_height
-                    if y + line_height < event.rect().top():
+                    if y + line_height < event_top:
                         continue
                     painter.drawText(0, y, width, line_height, Qt.AlignRight, str(first + row))
             block = block.next()
             top += height
+        painter.end()
+        return stale
