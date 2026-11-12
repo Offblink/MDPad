@@ -4,6 +4,7 @@ import os
 import markdown
 
 from .math_ext import MathExtension, has_math, katex_head_html
+from .mermaid_ext import MermaidExtension, has_mermaid, mermaid_head_html
 
 # 读取时尝试的编码顺序
 READ_ENCODINGS = ['utf-8', 'gbk', 'gb2312', 'gb18030', 'big5', 'latin-1']
@@ -44,6 +45,30 @@ EXPORT_HTML_TEMPLATE = """<!DOCTYPE html>
             padding: 16px;
             overflow: auto;
         }}
+        /* 流程图：渲染前按代码块样式显示源码，画出来后 SVG 居中 */
+        .mdpad-mermaid {{
+            font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, Courier, monospace;
+            font-size: 85%;
+            background-color: #f6f8fa;
+            border-radius: 3px;
+            padding: 16px;
+            overflow: auto;
+            white-space: pre-wrap;
+        }}
+        .mdpad-mermaid.mdpad-mermaid-done {{
+            font-family: inherit;
+            font-size: inherit;
+            background-color: transparent;
+            padding: 0;
+            margin: 1em 0;
+            overflow: visible;
+            white-space: normal;
+            text-align: center;
+        }}
+        .mdpad-mermaid.mdpad-mermaid-done svg {{
+            max-width: 100%;
+            height: auto;
+        }}
         blockquote {{
             border-left: 4px solid #dfe2e5;
             padding-left: 16px;
@@ -71,6 +96,7 @@ EXPORT_HTML_TEMPLATE = """<!DOCTYPE html>
         }}
     </style>
     {katex_head}
+    {mermaid_head}
 </head>
 <body>
     {html_content}
@@ -169,8 +195,12 @@ def render_export_html(markdown_text):
     """把 Markdown 渲染成完整 HTML 文档。"""
     html_content = markdown.markdown(
         markdown_text,
-        extensions=['extra', 'codehilite', 'toc', MathExtension()],
+        extensions=['extra', 'codehilite', 'toc', MathExtension(), MermaidExtension()],
     )
     # 有公式就把 KaTeX 内联进去：导出的单个 HTML 文件不依赖外部资源、断网也能渲染
     katex_head = katex_head_html() if has_math(html_content) else ''
-    return EXPORT_HTML_TEMPLATE.format(html_content=html_content, katex_head=katex_head)
+    # 流程图同理，mermaid 脚本也内联（资产缺失时退回源码原文）
+    mermaid_head = mermaid_head_html() if has_mermaid(html_content) else ''
+    return EXPORT_HTML_TEMPLATE.format(
+        html_content=html_content, katex_head=katex_head, mermaid_head=mermaid_head,
+    )

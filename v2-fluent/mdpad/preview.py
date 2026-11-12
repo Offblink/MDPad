@@ -14,6 +14,7 @@ import markdown
 
 from .links import classify_navigation_url, local_path_from_navigation, _fix_local_paths
 from .math_ext import KATEX_CSS, KATEX_DIR, KATEX_JS, MathExtension, render_function_js
+from .mermaid_ext import MERMAID_JS, MermaidExtension, render_function_js as mermaid_render_function_js
 from .srcmap import tag_top_blocks
 
 
@@ -266,6 +267,34 @@ BASE_HTML = """
             margin: 0;
         }
 
+        /* 流程图（mermaid 渲染前的占位元素）：没画出来时按代码块样式显示源码 */
+        .mdpad-mermaid {
+            font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, Courier, monospace;
+            font-size: 85%;
+            background-color: #f6f8fa;
+            border-radius: 3px;
+            padding: 16px;
+            overflow: auto;
+            white-space: pre-wrap;
+        }
+
+        /* 画出来了：SVG 居中、可缩放，占位的代码样式退掉 */
+        .mdpad-mermaid.mdpad-mermaid-done {
+            font-family: inherit;
+            font-size: inherit;
+            background-color: transparent;
+            padding: 0;
+            margin: 1em 0;
+            overflow: visible;
+            white-space: normal;
+            text-align: center;
+        }
+
+        .mdpad-mermaid.mdpad-mermaid-done svg {
+            max-width: 100%;
+            height: auto;
+        }
+
         /* 查找命中（分屏/预览模式下的预览侧高亮） */
         mark.mdpad-find {
             background: #fff3b0;
@@ -299,10 +328,12 @@ BASE_HTML = """
             if (window.mdpadBridge) { window.mdpadBridge.openExternal(href); }
         });
         /*mdpad-render-math*/
+        /*mdpad-render-mermaid*/
 
         // 查找命中高亮：把预览里所有命中包成 <mark>（当前命中蓝底），
-        // 可选把当前命中滚到视野中间。公式渲染结果（.katex）与脚本/样式跳过，
-        // 免得把 KaTeX 的排版结构拆坏。
+        // 可选把当前命中滚到视野中间。公式渲染结果（.katex）、流程图
+        // （.mdpad-mermaid，源码即将被 SVG 换掉）与脚本/样式跳过，
+        // 免得把 KaTeX/mermaid 的排版结构拆坏。
         var mdpadHighlightState = null;
 
         function mdpadClearHighlight(root) {
@@ -332,7 +363,9 @@ BASE_HTML = """
                         if (name === 'script' || name === 'style' || name === 'mark') {
                             return NodeFilter.FILTER_REJECT;
                         }
-                        if (p.classList && p.classList.contains('katex')) {
+                        if (p.classList &&
+                            (p.classList.contains('katex') ||
+                             p.classList.contains('mdpad-mermaid'))) {
                             return NodeFilter.FILTER_REJECT;
                         }
                         p = p.parentNode;
@@ -470,6 +503,11 @@ else:  # pragma: no cover - 随仓库分发，缺失只可能是打包漏了资�
 
 BASE_HTML = BASE_HTML.replace('    <!--mdpad-katex-head-->', _KATEX_HEAD_HTML)
 BASE_HTML = BASE_HTML.replace('        /*mdpad-render-math*/', render_function_js())
+# 流程图脚本走懒加载：只有真的画图时才去拉 2.8MB 的 mermaid.min.js
+BASE_HTML = BASE_HTML.replace(
+    '        /*mdpad-render-mermaid*/',
+    mermaid_render_function_js(MERMAID_JS.as_uri() if MERMAID_JS.is_file() else None),
+)
 
 
 class _ExternalLinkBridge(QObject):
@@ -586,6 +624,15 @@ class MarkdownPreview(QWebEngineView):
 
                     // 恢复滚动位置（走 mdpadScrollTo：自己滚的，不该被当成用户滚开）
                     mdpadScrollTo(scrollTop);
+
+                    // 渲染流程图（mermaid 是异步的）：SVG 高度出来后再把滚动位置钉回原处
+                    var mdpadMermaidDone = window.mdpadRenderMermaid
+                        ? window.mdpadRenderMermaid(contentDiv) : null;
+                    if (mdpadMermaidDone && mdpadMermaidDone.then) {{
+                        mdpadMermaidDone.then(
+                            function () {{ mdpadScrollTo(scrollTop); }},
+                            function () {{ mdpadScrollTo(scrollTop); }});
+                    }}
                 }}
             }} catch (e) {{
                 console.error('更新内容时出错:', e);
@@ -632,6 +679,7 @@ class MarkdownPreview(QWebEngineView):
                 'markdown.extensions.fenced_code',
                 'markdown.extensions.nl2br',
                 MathExtension(),
+                MermaidExtension(),
             ]
 
             # 顶层块先打上源码行号标记（跟随光标用；标记是 HTML 注释，不影响显示）
