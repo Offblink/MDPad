@@ -1,39 +1,24 @@
 """主窗口：Fluent 组件 + 文件操作编排。"""
 import os
-import threading
 
-from PyQt5.QtCore import Qt, QSettings, QObject, pyqtSignal, QTimer
-from PyQt5.QtGui import QFont, QIcon, QTextCursor, QDragEnterEvent, QDropEvent, QKeySequence
+from PyQt5.QtCore import Qt, QSettings, QTimer
+from PyQt5.QtGui import QColor, QFont, QIcon, QTextCursor, QDragEnterEvent, QDropEvent, QKeySequence
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QStatusBar, QFileDialog, QShortcut,
 )
 from qfluentwidgets import (
-    FluentIcon, ToolButton, SegmentedWidget, InfoBar, InfoBarPosition,
+    Action, ColorDialog, DropDownToolButton, FluentIcon, RoundMenu,
+    ToolButton, SegmentedWidget, InfoBar, InfoBarPosition,
     MessageBox, MessageBoxBase, BodyLabel, SubtitleLabel,
-    PrimaryPushButton, PushButton, setTheme, Theme, StateToolTip,
+    PrimaryPushButton, PushButton, setTheme, Theme,
 )
 
 from .preview import MarkdownPreview
 from .editor import CodeEditor
 from .dialogs import HelpDialog, _font_scale, _apply_font_scale
 from .search import FindReplaceDialog
-from . import io, ai_naming, recovery, __app_name__, __org_name__
-
-
-class _AiWorker(QObject):
-    """AI 命名后台任务：daemon 线程执行网络请求，完成后经信号回到主线程。
-
-    使用 daemon 线程：窗口关闭时不会阻塞退出，请求随进程结束被中断（只读 API，无副作用）。
-    """
-    done = pyqtSignal(object, object)  # (name, error)
-
-    def start(self, content):
-        threading.Thread(target=self._run, args=(content,), daemon=True).start()
-
-    def _run(self, content):
-        name, error = ai_naming.generate_filename_with_ai(content)
-        self.done.emit(name, error)
+from . import colors as color_utils, io, recovery, __app_name__, __org_name__
 
 
 class SaveChangesDialog(MessageBoxBase):
@@ -100,12 +85,6 @@ class MainWindow(QMainWindow):
         self._file_guard = io.FileGuard()
         # 主窗口快捷键（遮罩对话框期间统一禁用，见 _run_modal）
         self._shortcuts = []
-        # AI 命名异步状态
-        self._ai_worker = _AiWorker(self)
-        self._ai_worker.done.connect(self._on_ai_done)
-        self._ai_busy = False
-        self._ai_callback = None
-        self._ai_tip = None
         # 预览更新防抖：连续输入（含按住退格/删除键的自动重复）合并为一次渲染。
         # 原实现每个 textChanged 都同步做整篇 Markdown 渲染 + WebEngine JS 更新，
         # 大段退格时每删除一个字符就阻塞一次 GUI 线程，导致编辑卡顿。
@@ -180,7 +159,9 @@ class MainWindow(QMainWindow):
         self.link_btn = self._tool_button(FluentIcon.LINK, "插入链接 (Ctrl+L)", self.insert_link)
         self.code_btn = self._tool_button(FluentIcon.CODE, "插入代码块 (Ctrl+K)", self.insert_code_block)
         self.image_btn = self._tool_button(FluentIcon.PHOTO, "插入图片 (Ctrl+Shift+L)", self.insert_image)
-        for btn in (self.bold_btn, self.italic_btn, self.header_btn, self.link_btn, self.code_btn, self.image_btn):
+        self.color_btn = self._build_color_button()
+        for btn in (self.bold_btn, self.italic_btn, self.header_btn, self.link_btn,
+                    self.code_btn, self.image_btn, self.color_btn):
             bar.addWidget(btn)
 
         bar.addSpacing(12)
@@ -231,8 +212,36 @@ class MainWindow(QMainWindow):
             ("Ctrl+F", self.open_find),
             ("Ctrl+G", self.find_next),
             ("Ctrl+Shift+G", self.find_previous),
+            ("Ctrl+T", self.replace_current),
+            ("Ctrl+Shift+T", self.replace_all),
         ):
-            self._shortcuts.append(QShortcut(QKeySequence(sequence), self, slot))
+            shortcut = QShortcut(QKeySequence(sequence), self, slot)
+            if sequence in ("Ctrl+G", "Ctrl+Shift+G", "Ctrl+T", "Ctrl+Shift+T"):
+                # 这四个键在查找窗获得焦点时也要生效；查找窗内不再注册同名副本，
+                # 否则同一序列两处可匹配，Qt 判为歧义、两边都不触发。
+                shortcut.setContext(Qt.ApplicationShortcut)
+            self._shortcuts.append(shortcut)
+
+    def _build_color_button(self):
+        """字体颜色下拉：预设色 + 自定义选色面板 + 移除颜色。"""
+        menu = RoundMenu(parent=self)
+        for name, hex_color in color_utils.PRESET_COLORS:
+            action = Action(color_utils.swatch_icon(hex_color), name, parent=menu)
+            action.triggered.connect(lambda _checked=False, c=hex_color: self.apply_font_color(c))
+            menu.addAction(action)
+        menu.addSeparator()
+        custom = Action(FluentIcon.PALETTE, "自定义颜色…", parent=menu)
+        custom.triggered.connect(lambda _checked=False: self.choose_font_color())
+        menu.addAction(custom)
+        remove = Action(FluentIcon.DELETE, "移除颜色", parent=menu)
+        remove.triggered.connect(lambda _checked=False: self.remove_font_color())
+        menu.addAction(remove)
+
+        button = DropDownToolButton(FluentIcon.PALETTE, self.toolbar_area)
+        button.setToolTip("字体颜色（先选中文字）")
+        button.setMenu(menu)
+        button.setFixedSize(34, 34)
+        return button
 
     def _text_button(self, text, tip, slot):
         btn = ToolButton(self.toolbar_area)
@@ -293,13 +302,14 @@ class MainWindow(QMainWindow):
         于是主窗口的 QShortcut 会漏进模态流程：F1 叠出多个帮助框，Ctrl+O/Ctrl+N
         叠出多个保存确认框。遮罩本身挡住了鼠标，这里把键盘这条路也堵上。
         """
-        for shortcut in self._shortcuts:
+        states = [(shortcut, shortcut.isEnabled()) for shortcut in self._shortcuts]
+        for shortcut, _ in states:
             shortcut.setEnabled(False)
         try:
-            dialog.exec()
+            return dialog.exec()
         finally:
-            for shortcut in self._shortcuts:
-                shortcut.setEnabled(True)
+            for shortcut, enabled in states:
+                shortcut.setEnabled(enabled)
 
     def show_help(self):
         """弹出帮助窗口（F1 / 帮助按钮）。
@@ -335,6 +345,14 @@ class MainWindow(QMainWindow):
     def find_previous(self):
         """查找上一个（Ctrl+Shift+G）。"""
         self._ensure_find_dialog().find_previous()
+
+    def replace_current(self):
+        """替换当前（Ctrl+T）：不弹查找窗，沿用其中保留的查找/替换词。"""
+        self._ensure_find_dialog().replace_current()
+
+    def replace_all(self):
+        """全部替换（Ctrl+Shift+T）：不弹查找窗，沿用其中保留的查找/替换词。"""
+        self._ensure_find_dialog().replace_all()
 
     # ---------- 设置持久化与命令行 ----------
 
@@ -564,6 +582,80 @@ class MainWindow(QMainWindow):
         cursor.movePosition(QTextCursor.Left, QTextCursor.MoveAnchor, 5)  # 落在括号内、path 前
         self.text_edit.setTextCursor(cursor)
 
+    # ---------- 字体颜色 ----------
+
+    def _selection_context(self):
+        """单段选区上下文 (block, 块文本, 选区起点, 选区终点)；无选区或多段返回 None。"""
+        cursor = self.text_edit.textCursor()
+        if not cursor.hasSelection():
+            return None
+        document = self.text_edit.document()
+        start, end = cursor.selectionStart(), cursor.selectionEnd()
+        block = document.findBlock(start)
+        if block != document.findBlock(end - 1):
+            return None  # 跨段：不做外层标记识别，直接包裹
+        return block, block.text(), start - block.position(), end - block.position()
+
+    def _replace_block_range(self, block, start, end, new_text):
+        """替换块内 [start, end) 区间，光标落到替换后文本末尾。"""
+        cursor = QTextCursor(self.text_edit.document())
+        cursor.setPosition(block.position() + start)
+        cursor.setPosition(block.position() + end, QTextCursor.KeepAnchor)
+        cursor.insertText(new_text)
+        self.text_edit.setTextCursor(cursor)
+
+    def apply_font_color(self, color_hex):
+        """给选区上色：外层已有颜色标记则改色，否则包一层 span。"""
+        cursor = self.text_edit.textCursor()
+        if not cursor.hasSelection():
+            self.notify("info", "字体颜色", "请先选中要上色的文字", duration=2500)
+            return
+        context = self._selection_context()
+        if context is not None:
+            block, text, start, end = context
+            span = color_utils.surrounding_span(text, start, end)
+            if span is not None:
+                span_start, span_end, _ = span
+                wrapped = color_utils.wrap_colored(text[span_start:span_end], color_hex)
+                self._replace_block_range(block, span_start, span_end, wrapped)
+                return
+        selected = cursor.selectedText().replace("\u2029", "\n")
+        cursor.insertText(color_utils.wrap_colored(selected, color_hex))
+        self.text_edit.setTextCursor(cursor)
+
+    def remove_font_color(self):
+        """剥掉包住选区的颜色标记；选区本身没有标记时只提示、不改文档。"""
+        cursor = self.text_edit.textCursor()
+        if not cursor.hasSelection():
+            self.notify("info", "字体颜色", "请先选中要处理的文字", duration=2500)
+            return
+        context = self._selection_context()
+        if context is not None:
+            block, text, start, end = context
+            span = color_utils.surrounding_span(text, start, end)
+            if span is not None:
+                span_start, span_end, _ = span
+                inner = color_utils.unwrap_colored(text[span_start:span_end])
+                if inner is not None:
+                    self._replace_block_range(block, span_start, span_end, inner)
+                    return
+        selected = cursor.selectedText().replace("\u2029", "\n")
+        inner = color_utils.unwrap_colored(selected)
+        if inner is None:
+            self.notify("info", "字体颜色", "选区没有颜色标记", duration=2500)
+            return
+        cursor.insertText(inner)
+        self.text_edit.setTextCursor(cursor)
+
+    def choose_font_color(self):
+        """展开选色面板；确认后应用并把自定义色记进设置。"""
+        initial = QColor(self.settings.value("font_color", color_utils.PRESET_COLORS[0][1]))
+        dialog = ColorDialog(initial, "选择字体颜色", self)
+        if self._run_modal(dialog):
+            color_hex = dialog.color.name()
+            self.settings.setValue("font_color", color_hex)
+            self.apply_font_color(color_hex)
+
     # ---------- 视图开关 ----------
 
     def toggle_line_numbers(self):
@@ -673,16 +765,8 @@ class MainWindow(QMainWindow):
             self.save_file_as()
 
     def save_file_as(self):
-        """另存为：先异步获取 AI 文件名建议，再弹出保存对话框（不阻塞 UI）。"""
-        self._ai_suggested_name(self._proceed_save_as)
-
-    def _proceed_save_as(self, suggested):
-        if suggested:
-            initial_file = suggested + ".md"
-        elif self.current_file:
-            initial_file = os.path.basename(self.current_file)
-        else:
-            initial_file = "无标题.md"
+        """另存为：弹出保存对话框（默认名取当前文件名）。"""
+        initial_file = os.path.basename(self.current_file) if self.current_file else "无标题.md"
         file_path, _ = QFileDialog.getSaveFileName(
             self, "保存Markdown文件", initial_file,
             "Markdown文件 (*.md *.markdown);;文本文件 (*.txt);;所有文件 (*.*)"
@@ -707,16 +791,8 @@ class MainWindow(QMainWindow):
             self.notify("error", "保存失败", str(e))
 
     def export_html(self):
-        """导出为 HTML：先异步获取 AI 文件名建议，再弹出保存对话框（不阻塞 UI）。"""
-        self._ai_suggested_name(self._proceed_export)
-
-    def _proceed_export(self, suggested):
-        if suggested:
-            base = suggested
-        elif self.current_file:
-            base = os.path.splitext(os.path.basename(self.current_file))[0]
-        else:
-            base = "导出文档"
+        """导出为 HTML：弹出保存对话框（默认名取当前文件名）。"""
+        base = os.path.splitext(os.path.basename(self.current_file))[0] if self.current_file else "导出文档"
         file_path, _ = QFileDialog.getSaveFileName(
             self, "导出为HTML", base + ".html",
             "HTML文件 (*.html *.htm);;所有文件 (*.*)"
@@ -766,41 +842,6 @@ class MainWindow(QMainWindow):
             recovery.drop(self._recovery_key())
             return True
         return False
-
-    def _ai_suggested_name(self, callback):
-        """异步调用 AI 生成文件名建议，完成后经回调返回；期间不阻塞 UI。
-
-        回调签名: callback(name)，name 为 None 表示无建议（失败/空文档/已在请求中）。
-        """
-        content = self.text_edit.toPlainText()
-        if not content or not content.strip():
-            callback(None)
-            return
-        if self._ai_busy:
-            callback(None)  # 已有请求在跑，直接走默认名
-            return
-        self._ai_busy = True
-        self._ai_callback = callback
-        self._ai_tip = StateToolTip("AI 命名中", "正在根据内容生成文件名…", self)
-        self._ai_tip.move(self._ai_tip.getSuitablePos())
-        self._ai_tip.show()
-        self._ai_worker.start(content)
-
-    def _on_ai_done(self, name, error):
-        self._ai_busy = False
-        callback, self._ai_callback = self._ai_callback, None
-        tip, self._ai_tip = self._ai_tip, None
-        if error:
-            if tip is not None:
-                tip.setContent(error)
-                tip.setState(False)
-                QTimer.singleShot(2000, tip.hide)
-            callback(None)
-            return
-        if tip is not None:
-            tip.setContent(f"AI 命名完成: {name}" if name else "AI 未返回文件名")
-            tip.setState(True)  # 成功状态：1 秒后自动淡出
-        callback(name)
 
     # ---------- 拖放 ----------
 

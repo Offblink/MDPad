@@ -2,10 +2,23 @@
 import os
 import sys
 
-from PyQt5.QtCore import QTimer
+from PyQt5.QtCore import QLocale, QTimer
 from PyQt5.QtWidgets import QApplication
 
 from . import __app_name__, __org_name__, __org_domain__, recovery, singleton
+
+
+def _install_fluent_translator(app):
+    """装 qfluentwidgets 自带的中文翻译。
+
+    内置控件（选色面板 ColorDialog、输入框右键菜单等）的文案走 tr()，不装翻译
+    就是英文；应用本体是中文，这里统一成 zh_CN。
+    """
+    from qfluentwidgets import FluentTranslator
+
+    translator = FluentTranslator(QLocale("zh_CN"), app)
+    app.installTranslator(translator)
+    app._fluent_translator = translator  # 持有引用，防止被回收
 
 
 def create_app(argv=None):
@@ -19,6 +32,7 @@ def create_app(argv=None):
     app.setApplicationName(__app_name__)
     app.setOrganizationName(__org_name__)
     app.setOrganizationDomain(__org_domain__)
+    _install_fluent_translator(app)
     return app
 
 

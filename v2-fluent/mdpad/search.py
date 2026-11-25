@@ -89,9 +89,8 @@ class FindReplaceDialog(QDialog):
         self.case_sensitive_radio.toggled.connect(self._refresh_count)
         self._editor.document().contentsChanged.connect(self._refresh_count)
 
-        # 快捷键（窗口内）
-        QShortcut(QKeySequence("Ctrl+G"), self, self.find_next)
-        QShortcut(QKeySequence("Ctrl+Shift+G"), self, self.find_previous)
+        # 快捷键：查找/替换四键由主窗口以 ApplicationShortcut 注册（查找窗有焦点时
+        # 也生效）；这里再注册同名序列会与主窗口互判歧义，导致两边都不触发。
         QShortcut(QKeySequence(Qt.Key_Escape), self, self.hide)
 
         self._refresh_count()
@@ -153,9 +152,10 @@ class FindReplaceDialog(QDialog):
         self.replace_box = LineEdit(self.card)
         self.replace_box.setPlaceholderText("替换为")
         self.replace_btn = PushButton("替换")
-        self.replace_btn.setToolTip("替换当前匹配并跳转到下一个")
+        self.replace_btn.setToolTip("替换当前匹配并跳转到下一个 (Ctrl+T)")
         self.replace_btn.clicked.connect(self.replace_current)
         self.replace_all_btn = PushButton("全部替换")
+        self.replace_all_btn.setToolTip("替换全部匹配 (Ctrl+Shift+T)")
         self.replace_all_btn.clicked.connect(self.replace_all)
         replace_row.addWidget(self.replace_label)
         replace_row.addWidget(self.replace_box, 1)
@@ -309,18 +309,18 @@ class FindReplaceDialog(QDialog):
     # ---------- 查找 ----------
 
     def find_next(self):
-        """查找下一个（从当前光标向后，到末尾循环）。"""
-        self._find(backward=False)
+        """查找下一个（从当前光标向后，到末尾循环）；返回是否命中。"""
+        return self._find(backward=False)
 
     def find_previous(self):
-        """查找上一个（从当前光标向前，到开头循环）。"""
-        self._find(backward=True)
+        """查找上一个（从当前光标向前，到开头循环）；返回是否命中。"""
+        return self._find(backward=True)
 
     def _find(self, backward):
         query = self._query()
         if not query:
             self.show_find()
-            return
+            return False
         document = self._editor.document()
         find_flags = _find_flags(self._case_sensitive(), backward)
 
@@ -334,7 +334,7 @@ class FindReplaceDialog(QDialog):
             else:
                 found = document.find(query, 0, find_flags)
         if found.isNull():
-            return
+            return False
         self._editor.setTextCursor(found)
         self._editor.ensureCursorVisible()
         self._highlight_preview(scroll=True)
@@ -344,38 +344,50 @@ class FindReplaceDialog(QDialog):
                 "已到文件末尾，循环到开头" if not backward else "已到文件开头，循环到末尾",
                 duration=2000,
             )
+        return True
 
     def _search_start(self, backward):
         """搜索起点：当前选中即查找词时跳过它，避免原地打转。"""
         cursor = self._editor.textCursor()
         if not cursor.hasSelection():
             return cursor.position()
-        selected = cursor.selectedText()
-        query = self._query()
-        same = selected == query if self._case_sensitive() else selected.lower() == query.lower()
-        if same:
+        if self._selection_matches():
             return cursor.selectionStart() if backward else cursor.selectionEnd()
         return cursor.selectionStart() if backward else cursor.position()
 
     # ---------- 替换 ----------
 
-    def replace_current(self):
-        """替换当前选中的匹配，然后自动查找下一个。"""
-        if not self._query():
-            return
+    def _selection_matches(self):
+        """当前选区是否正好是查找词（大小写按选项）。"""
         cursor = self._editor.textCursor()
-        if cursor.hasSelection():
-            selected = cursor.selectedText()
-            query = self._query()
-            same = selected == query if self._case_sensitive() else selected.lower() == query.lower()
-            if same:
-                cursor.insertText(self.replace_box.text())
+        if not cursor.hasSelection():
+            return False
+        query = self._query()
+        selected = cursor.selectedText()
+        if self._case_sensitive():
+            return selected == query
+        return selected.lower() == query.lower()
+
+    def replace_current(self):
+        """替换当前匹配并跳到下一个；还没定位到匹配时先自动找下一个再替换。"""
+        query = self._query()
+        if not query:
+            self._main.notify("info", "替换", "请先用 Ctrl+F 输入查找内容", duration=2500)
+            return
+        if not self._selection_matches():
+            if not self.find_next():
+                self._main.notify("info", "替换", "未找到匹配项", duration=2000)
+                return
+        if self._selection_matches():
+            cursor = self._editor.textCursor()
+            cursor.insertText(self.replace_box.text())
         self.find_next()
 
     def replace_all(self):
         """从文档开头替换全部匹配（反向位置替换，免疫自引用），报告数量。"""
         query = self._query()
         if not query:
+            self._main.notify("info", "替换", "请先用 Ctrl+F 输入查找内容", duration=2500)
             return
         document = self._editor.document()
         find_flags = _find_flags(self._case_sensitive())
