@@ -2,7 +2,7 @@
 
 ## Problem
 
-1. **字体颜色**：编辑器没有给文字上色的入口。需求：工具栏点开出现下拉菜单（红 / 绿 / 蓝 / 黑），并可展开选色面板自定义颜色。
+1. **字体颜色**：编辑器没有给文字上色的入口。需求：工具栏点开出现下拉菜单（红 / 绿 / 蓝），并可展开选色面板自定义颜色。
 2. **替换快捷键**：查找已有 Ctrl+F / Ctrl+G / Ctrl+Shift+G，替换与全部替换只有按钮，且必须先打开窗口。
 3. **去掉 AI 命名**：另存为 / 导出前会异步请求 AI 生成文件名（依赖 `%APPDATA%\MDPad\ai_key.txt`），属于外部依赖，移除以收敛应用职责。
 4. **简化应用说明**：帮助页「应用说明」目前是完整版本历史，需求是只介绍应用本身，不追踪版本。
@@ -54,7 +54,6 @@
 | ● 红色 `#E81123` | 给选区包上颜色标记 |
 | ● 绿色 `#107C10` | 同上 |
 | ● 蓝色 `#0078D4` | 同上 |
-| ● 黑色 `#000000` | 同上（显式黑色，非"移除"） |
 | 自定义颜色… | 打开 `ColorDialog`，取色后应用；初始值 = 上次自定义色（持久化到 QSettings `font_color`） |
 | 移除颜色 | 剥掉包住选区的颜色标记，恢复纯文本 |
 
@@ -116,7 +115,7 @@
    - `span_context(block_text, start, end)` → 返回外层颜色标记范围（纯函数，便于离线测试）
    - `swatch_icon(color, size=16)`：`QPainter` 画圆角色块，供菜单项图标
 2. **`mdpad/main_window.py`**
-   - 工具栏 `DropDownToolButton`（PALETTE）+ `RoundMenu`：四个预设色（色块图标）+ 分隔线 + 自定义 + 移除
+   - 工具栏 `DropDownToolButton`（PALETTE）+ `RoundMenu`：三个预设色（色块图标）+ 分隔线 + 自定义 + 移除
    - `apply_font_color(color)` / `remove_font_color()`：单段落用上面的纯函数；跨段落直接包裹
    - 自定义色用 `ColorDialog`，结果写入 `QSettings("font_color")`
    - 新增主窗口 `QShortcut`：`Ctrl+T` → `replace_current_windowless`、`Ctrl+Shift+T` → `replace_all_windowless`
@@ -151,7 +150,7 @@
 
 **真实窗口（本机真平台，QTimer 自动关闭）**
 
-- 工具栏按钮存在、菜单 4 色 + 自定义 + 移除齐全
+- 工具栏按钮存在、菜单 3 色 + 自定义 + 移除齐全
 - 选中「hello」→ 触发红色动作 → 文档变为 `<span style="color:#E81123">hello</span>`
 - 再选中内部文本 → 触发蓝色 → 外层颜色值变为 `#0078D4`（不嵌套）
 - 移除颜色 → 恢复 `hello`
