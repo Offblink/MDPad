@@ -3,6 +3,7 @@ import os
 
 import markdown
 
+from .color_ext import ColorExtension
 from .math_ext import MathExtension, has_math, katex_head_html
 from .mermaid_ext import MermaidExtension, has_mermaid, mermaid_head_html
 
@@ -195,7 +196,8 @@ def render_export_html(markdown_text):
     """把 Markdown 渲染成完整 HTML 文档。"""
     html_content = markdown.markdown(
         markdown_text,
-        extensions=['extra', 'codehilite', 'toc', MathExtension(), MermaidExtension()],
+        extensions=['extra', 'codehilite', 'toc', MathExtension(), MermaidExtension(),
+                    ColorExtension()],
     )
     # 有公式就把 KaTeX 内联进去：导出的单个 HTML 文件不依赖外部资源、断网也能渲染
     katex_head = katex_head_html() if has_math(html_content) else ''

@@ -223,7 +223,7 @@ class MainWindow(QMainWindow):
             self._shortcuts.append(shortcut)
 
     def _build_color_button(self):
-        """字体颜色下拉：预设色 + 自定义选色面板 + 移除颜色。"""
+        """字体颜色下拉：预设色（单字标记名）+ 自定义选色面板 + 移除颜色。"""
         menu = RoundMenu(parent=self)
         for name, hex_color in color_utils.PRESET_COLORS:
             action = Action(color_utils.swatch_icon(hex_color), name, parent=menu)
@@ -605,7 +605,11 @@ class MainWindow(QMainWindow):
         self.text_edit.setTextCursor(cursor)
 
     def apply_font_color(self, color_hex):
-        """给选区上色：外层已有颜色标记则改色，否则包一层 span。"""
+        """给选区上色：外层已有颜色标记则改色，否则包一层短标记。
+
+        写入 ``[红]文字[/]``（预设色）或 ``[#e81123]文字[/]``（自定义色）；
+        预览与导出由 color_ext 换成内联 HTML，编辑器里由 highlight 直接着色。
+        """
         cursor = self.text_edit.textCursor()
         if not cursor.hasSelection():
             self.notify("info", "字体颜色", "请先选中要上色的文字", duration=2500)

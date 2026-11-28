@@ -13,6 +13,7 @@ from PyQt5.QtWebChannel import QWebChannel
 import markdown
 
 from .links import classify_navigation_url, local_path_from_navigation, _fix_local_paths
+from .color_ext import ColorExtension
 from .math_ext import KATEX_CSS, KATEX_DIR, KATEX_JS, MathExtension, render_function_js
 from .mermaid_ext import MERMAID_JS, MermaidExtension, render_function_js as mermaid_render_function_js
 from .srcmap import tag_top_blocks
@@ -680,6 +681,7 @@ class MarkdownPreview(QWebEngineView):
                 'markdown.extensions.nl2br',
                 MathExtension(),
                 MermaidExtension(),
+                ColorExtension(),
             ]
 
             # 顶层块先打上源码行号标记（跟随光标用；标记是 HTML 注释，不影响显示）

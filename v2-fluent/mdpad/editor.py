@@ -17,6 +17,8 @@ from PyQt5.QtCore import QSize, Qt
 from PyQt5.QtGui import QPainter
 from PyQt5.QtWidgets import QPlainTextEdit, QWidget
 
+from .highlight import ColorMarkupHighlighter
+
 
 class LineNumberArea(QWidget):
     """行号栏：绘制与尺寸都委托给编辑器。"""
@@ -41,6 +43,8 @@ class CodeEditor(QPlainTextEdit):
         self._margin = -1
         self._rows_cache = None
         self._line_number_area = LineNumberArea(self)
+        # 颜色标记着色：标记里的文字按颜色显示、标记淡成水印（见 highlight.py）
+        self._color_highlighter = ColorMarkupHighlighter(self.document())
         self.blockCountChanged.connect(lambda _: self.update_line_number_area_width())
         # 视觉行号：换行宽度变化/正文增减都会改总行数（行号栏宽度跟着位数走）
         self.document().documentLayout().documentSizeChanged.connect(
